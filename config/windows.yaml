@@ -1,0 +1,30 @@
+# Activity windows in user-local time (24h). Times outside the window: scheduler skips.
+# Days: 0=Mon ... 6=Sun. Empty list = all days.
+
+youtube:
+  inbound:
+    days: []                  # 24/7 — moderation can't wait
+    start: "00:00"
+    end:   "23:59"
+
+x:
+  inbound:
+    days: [0, 1, 2, 3, 4, 5, 6]
+    start: "07:00"
+    end:   "22:00"
+  outbound:
+    days: [0, 1, 2, 3, 4]    # weekdays only
+    start: "09:00"
+    end:   "18:00"
+
+linkedin:
+  inbound:
+    days: [0, 1, 2, 3, 4]
+    start: "08:00"
+    end:   "19:00"
+  outbound:
+    days: [0, 1, 2, 3, 4]
+    start: "09:00"
+    end:   "17:00"
+
+timezone: America/Los_Angeles    # adjust to user's TZ

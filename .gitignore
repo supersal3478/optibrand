@@ -1,0 +1,50 @@
+.env
+.env.*
+!.env.example
+
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+*.egg-info/
+.venv/
+venv/
+dist/
+build/
+
+# Hermes runtime — never commit
+.hermes/
+
+# Local state we never commit
+data/
+logs/
+*.session
+*.har
+*.db
+*.db-journal
+*.db-wal
+*.db-shm
+
+# OS
+.DS_Store
+
+# Corpus is private to the user — uncomment to gitignore
+# corpus/*.jsonl
+
+# Approval proof — never commit
+corpus/x_approval.pdf
+
+# Live API key reference — never commit
+51_AZURE_LLM_DEPLOYMENTS_AND_AGENT_RULES.md
+*_LLM_DEPLOYMENTS_*.md
+
+# Risk acknowledgment — uncomment if you don't want to commit your signature
+# RISK_ACCEPTED.md
+
+# Vendored upstream Hermes (cloned from NousResearch/hermes-agent).
+# Not committed — too large (~230MB) and the upstream is public. The vendor/README.md
+# in this repo documents how to restore the directory on a fresh clone.
+vendor/*
+!vendor/README.md

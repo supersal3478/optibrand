@@ -1,0 +1,33 @@
+# Accounts, keywords, and domains the agent must never engage with — inbound or outbound.
+# Matching is case-insensitive substring for keywords/domains, exact-handle for handles.
+
+handles:
+  x: []        # @username (no @)
+  linkedin: [] # vanity slug or LinkedIn URN
+  youtube: []  # channel handle
+
+keywords:
+  # Comments containing any of these are auto-skipped (won't reply, won't delete unless toxic)
+  - airdrop
+  - giveaway
+  - DM me
+  - check my profile
+
+domains:
+  # Comments/posts linking to these domains are auto-skipped
+  - bit.ly
+  - tinyurl.com
+  - t.me
+
+# Topical blocklist — handled by relevance-scorer
+off_topic_categories:
+  - crypto-shilling
+  - mlm
+  - adult
+  - gambling
+
+# Accounts we will engage with even if they trip a keyword filter (allowlist override)
+trusted_handles:
+  x: []
+  linkedin: []
+  youtube: []

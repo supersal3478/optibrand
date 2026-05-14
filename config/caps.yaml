@@ -1,0 +1,58 @@
+# Per-platform caps and the master kill-switches.
+# Flip live: false to halt that platform within one job tick (≤ scheduler interval).
+# Caps are read fresh at the start of every job — no restart needed to change them.
+
+# Phase gating: launchd installs only the caps for the current phase.
+# scripts/verify-phase.py N validates go-criteria before flipping a higher phase on.
+phase: 0  # 0=foundation, 1=youtube, 2=inbound, 3=x_outbound, 4=linkedin_outbound
+
+youtube:
+  live: false
+  inbound:
+    replies_per_day: 40
+    delete_spam: true            # unlimited deletes; the API rate is the only cap
+    classify_threshold_spam: 0.85
+    classify_threshold_toxic: 0.80
+  api:
+    daily_quota_units: 9000      # leave 1000 unit buffer below the 10K default
+
+x:
+  live: false
+  inbound:
+    replies_per_day: 30
+    requires_approval_flag: true # gated on X_AUTO_REPLY_APPROVED env var
+  outbound:
+    comments_per_day: 15
+    relevance_min: 0.75          # relevance-scorer must score ≥ this to consider
+    weekday_only: true
+  cost:
+    daily_cap_usd: 2.0
+    abort_on_cap: true
+
+linkedin:
+  live: false
+  inbound:
+    replies_per_day: 25
+  outbound:
+    comments_per_day: 25
+    comments_per_week: 120
+    relevance_min: 0.80
+    weekday_only: true
+    requires_risk_accepted: true # checks for /RISK_ACCEPTED.md
+  session:
+    require_warmed_days: 30      # account must be ≥ 30d of regular human use
+    headed_login_first: true     # first login must be in headed mode
+
+# Outbound 5-minute hold buffer (recommended even under "fully autonomous")
+# Drafts surface in the dashboard for this long before posting; you can yank.
+hold_buffer_outbound_seconds: 300
+hold_buffer_inbound_seconds: 0   # inbound replies post immediately
+hold_buffer_youtube_seconds: 0
+
+# Cost caps (also enforced by cost-meter skill)
+anthropic:
+  daily_cap_usd: 5.0
+  abort_on_cap: true
+  default_model: claude-sonnet-4-6
+  high_stakes_model: claude-opus-4-7   # used only when relevance ≥ 0.92 and follower count ≥ N
+  high_stakes_relevance_min: 0.92

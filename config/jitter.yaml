@@ -1,0 +1,20 @@
+# Per-action delay jitter, in seconds. Uniform random within [min, max] applied per action.
+# Long jitter on outbound is the single largest defense against pattern-detection.
+
+youtube:
+  inbound:        { min: 0,    max: 90 }
+
+x:
+  inbound:        { min: 30,   max: 180 }
+  outbound:       { min: 300,  max: 1500 }   # 5–25 min
+  read:           { min: 0,    max: 5 }
+
+linkedin:
+  inbound:        { min: 120,  max: 480 }    # 2–8 min
+  outbound:       { min: 300,  max: 1200 }   # 5–20 min
+  page_dwell:     { min: 8,    max: 35 }     # how long Playwright "reads" a page
+  scroll_burst:   { min: 1,    max: 4 }      # mini-scrolls per dwell
+  typing_cps:     { min: 3,    max: 8 }      # chars per second when typing
+
+# Global between-job jitter (applied on top of cron interval)
+between_job_secs: { min: 0, max: 30 }
