@@ -20,9 +20,16 @@ fi
 # Install chromium for Playwright
 "$VENV/bin/playwright" install chromium
 
-# Symlink lipy onto PATH
+# Install a wrapper at ~/.local/bin/lipy that execs the venv python with lipy.py.
+# Symlinking lipy.py directly leaves it running under system python (per the
+# `#!/usr/bin/env python3` shebang), which doesn't have Playwright installed —
+# lipy.py imports playwright lazily and returns playwright_not_installed.
 mkdir -p "$BIN"
-ln -sf "$HERE/lipy.py" "$BIN/lipy"
+cat > "$BIN/lipy" <<EOF
+#!/usr/bin/env bash
+exec "$VENV/bin/python" "$HERE/lipy.py" "\$@"
+EOF
+chmod +x "$BIN/lipy"
 chmod +x "$HERE/lipy.py"
 
 echo "OK — lipy installed at $BIN/lipy"

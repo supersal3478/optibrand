@@ -15,8 +15,8 @@ Usage:
     cdp_eval.py --tab-url-substring 'x.com' --expr '...'
     cdp_eval.py --navigate 'https://x.com/notifications/mentions'
 
-Requires the Hermes Python venv (its websockets module):
-    /Users/salsmacos/Desktop/projects/brand-growth-engine/vendor/hermes-agent/.venv/bin/python
+Requires the `websockets` module. The project's Hermes venv has it (installed
+by setup.sh): vendor/hermes-agent/.venv/bin/python
 """
 from __future__ import annotations
 

@@ -1,0 +1,56 @@
+# schedule.yaml — the single source of truth for what you're posting and when.
+#
+# Copy to schedule.yaml (gitignored) and edit. The autonomous daemon reads this
+# file every minute; you can edit and save without restarting anything.
+#
+# Each entry triggers, in order:
+#   1. PRE-POST ENGAGEMENT — `goodwill_minutes_before` before `time`, run
+#      `count` outbound comments on relevant posts in the same platform.
+#      Goal: warm the feed before your post drops.
+#   2. POST — at `time`, post the content at `draft` to `platform`.
+#      (If draft is omitted, the agent skips publishing and you post manually.)
+#   3. POST-MONITOR — for `monitor_hours_after` hours after `time`, every
+#      `inbound_poll_minutes`, scan that post for new comments and reply.
+
+timezone: America/Toronto
+
+# Defaults applied to every post unless overridden inline.
+defaults:
+  goodwill_minutes_before: 30
+  goodwill_count: 10
+  monitor_hours_after: 24
+  inbound_poll_minutes: 15
+  goodwill_enabled: true
+
+# Posts. Use ISO-8601 local time (the timezone above is applied).
+posts:
+  - id: 2026-05-17-li-01
+    platform: linkedin
+    time: "2026-05-17T09:00:00"
+    draft: drafts/2026-05-17-li-01.md          # optional; agent posts if present
+    topic_keywords: [claude-code, ai-agents]   # used by relevance-scorer for goodwill
+
+  - id: 2026-05-17-x-01
+    platform: x
+    time: "2026-05-17T09:30:00"
+    draft: drafts/2026-05-17-x-01.md
+    topic_keywords: [mcp, context-engineering]
+
+  - id: 2026-05-18-li-01
+    platform: linkedin
+    time: "2026-05-18T08:30:00"
+    draft: drafts/2026-05-18-li-01.md
+    topic_keywords: [no-code, founder]
+    # Per-post overrides (optional):
+    goodwill_count: 15
+    monitor_hours_after: 48
+
+# Recurring background jobs (run independent of any specific post).
+recurring:
+  daily_report:
+    enabled: true
+    time: "23:55"   # local — emits ~/.hermes/reports/YYYY-MM-DD.md
+  voice_retrain:
+    enabled: true
+    weekday: sunday
+    time: "02:00"

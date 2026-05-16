@@ -14,7 +14,7 @@ Last updated: 2026-05-14 (after live proof: a reply to @VadimStrizheus posted vi
 - **Typing into the composer:** `Input.insertText` (CDP method, not DOM `execCommand`). Mandatory for X's DraftJS composer — anything else either fails to insert or fails to flip the submit button to enabled.
 - **Clicking submit:** `Runtime.evaluate` with `userGesture: true` on `button[data-testid="tweetButtonInline"]`. The `userGesture` flag is required; without it React rejects the click as automated.
 - **Verifying:** `Page.captureScreenshot` via CDP (not macOS screen capture, which can return blank for backgrounded windows).
-- **Python prerequisite:** the `websockets` module. The Hermes venv at `/Users/salsmacos/Desktop/projects/brand-growth-engine/vendor/hermes-agent/.venv/bin/python` has it.
+- **Python prerequisite:** the `websockets` module. The project's Hermes venv has it: `<project>/vendor/hermes-agent/.venv/bin/python` (installed by `setup.sh`).
 
 ---
 
@@ -57,7 +57,7 @@ Grant macOS Accessibility + Screen Recording permissions once when prompted by t
 | Inline reply composer (DraftJS contenteditable) | `div[data-testid="tweetTextarea_0"]` |
 | Inline reply submit button | `button[data-testid="tweetButtonInline"]` |
 | Modal reply submit button | `button[data-testid="tweetButton"]` |
-| Logged-in indicator | `[data-testid="AccountSwitcher_Button"]` |
+| Logged-in indicator | `[data-testid="SideNav_AccountSwitcher_Button"]` |
 | Notifications sidebar link | `a[data-testid="AppTabBar_Notifications_Link"]` |
 | Mentions sub-tab | `a[role="tab"][href$="/mentions"]` (text content "Mentions") |
 | Compose tweet button (sidebar) | `a[data-testid="SideNav_NewTweet_Button"]` |
@@ -124,7 +124,7 @@ skills/x-engage/
 └── cdp_eval.py       ← thin CDP CLI: --expr / --navigate
 ```
 
-The only Python module needed is `websockets` (16.0). Available via the Hermes venv: `/Users/salsmacos/Desktop/projects/brand-growth-engine/vendor/hermes-agent/.venv/bin/python`.
+The only Python module needed is `websockets` (16.0). Available via the project's Hermes venv: `<project>/vendor/hermes-agent/.venv/bin/python` (installed by `setup.sh`).
 
 There is no `xipy.py` wrapper today. The proven recipes live inline in the SKILL.md. If the workflow grows complex enough to need a CLI wrapper, build one then — don't pre-build.
 

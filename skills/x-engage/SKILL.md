@@ -10,12 +10,13 @@ metadata:
     tags: [x, twitter, social-media, browser-automation, cdp]
 prerequisites:
   commands:
-    - /Users/salsmacos/.local/bin/cua-driver   # used only for app/window inventory + screenshots
+    - cua-driver   # ~/.local/bin/cua-driver; app/window inventory + screenshots only
+    - start-chrome-cdp   # ~/.local/bin/start-chrome-cdp; brings up the dedicated CDP Chrome
   files:
     - <project>/BRAND.md
     - <project>/skills/x-engage/cdp_eval.py
   python:
-    - /Users/salsmacos/Desktop/projects/brand-growth-engine/vendor/hermes-agent/.venv/bin/python  # provides the websockets library cdp_eval needs
+    - <project>/vendor/hermes-agent/.venv/bin/python  # provides the websockets library cdp_eval needs
   skills:
     - brand-guard
     - reply-drafter
@@ -86,6 +87,10 @@ User runs these once, outside the agent session. The agent verifies via the chec
 1. Install `cua-driver` (Rust port, Monterey-compatible). See [docs/x-engineering.md](../../docs/x-engineering.md#installing-cua-driver-on-monterey).
 2. Launch the dedicated CDP Chrome (also do this each time you start the workflow):
    ```bash
+   start-chrome-cdp
+   ```
+   Idempotent shim at [`skills/x-engage/start-chrome-cdp.sh`](start-chrome-cdp.sh), symlinked into `~/.local/bin/`. If CDP is already up on 9222 it exits 0 without relaunching, otherwise it launches Chrome with the right flags and waits up to 10s for the debug port to come up. The raw equivalent:
+   ```bash
    mkdir -p "$HOME/.hermes/state/chrome-cdp"
    '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome' \
      --remote-debugging-port=9222 \
@@ -106,11 +111,13 @@ User runs these once, outside the agent session. The agent verifies via the chec
 Located at [`skills/x-engage/cdp_eval.py`](cdp_eval.py). The single utility that wraps CDP `Runtime.evaluate` and `Page.navigate` for ad-hoc use. Invoke via the Hermes venv's Python (where `websockets` is installed):
 
 ```bash
-HERMES_PY=/Users/salsmacos/Desktop/projects/brand-growth-engine/vendor/hermes-agent/.venv/bin/python
-CDP=/Users/salsmacos/Desktop/projects/brand-growth-engine/skills/x-engage/cdp_eval.py
+# Resolve from the project root (set this once in your shell or use $PWD if you're inside the repo)
+BGE_ROOT="${BGE_ROOT:-$PWD}"
+HERMES_PY="$BGE_ROOT/vendor/hermes-agent/.venv/bin/python"
+CDP="$BGE_ROOT/skills/x-engage/cdp_eval.py"
 
 # Read login state + page metadata
-$HERMES_PY $CDP --expr 'JSON.stringify({url: window.location.href, title: document.title, logged_in: !!document.querySelector("[data-testid=AccountSwitcher_Button]")})'
+$HERMES_PY $CDP --expr 'JSON.stringify({url: window.location.href, title: document.title, logged_in: !!document.querySelector("[data-testid=SideNav_AccountSwitcher_Button]")})'
 
 # Navigate
 $HERMES_PY $CDP --navigate 'https://x.com/notifications/mentions'
@@ -214,7 +221,7 @@ If the toast/modal don't appear, the click failed. Common causes: composer text 
 | Inline reply composer | `div[data-testid="tweetTextarea_0"]` |
 | Inline reply submit | `button[data-testid="tweetButtonInline"]` |
 | Modal reply submit | `button[data-testid="tweetButton"]` |
-| AccountSwitcher (logged-in indicator) | `[data-testid="AccountSwitcher_Button"]` |
+| AccountSwitcher (logged-in indicator) | `[data-testid="SideNav_AccountSwitcher_Button"]` |
 | Tweet permalink anchor | `a[href*="/status/"]` (use to get tweet ID) |
 
 X's data-testid attributes are stable — their internal QA depends on them. If they roll, see [docs/x-engineering.md](../../docs/x-engineering.md) for the diagnostic + update procedure.
@@ -261,7 +268,7 @@ Same shape as `linkedin-engage`'s inbound flow. Pre-flight gates that must all p
 2. `caps.yaml: x.live` is `true`
 3. `X_AUTO_REPLY_APPROVED=true` in `~/.hermes/.env` (required by X's Feb 2026 policy regardless of transport)
 4. CDP Chrome is up: `curl -s http://localhost:9222/json/version` returns JSON
-5. Active session: a `Runtime.evaluate` for `[data-testid="AccountSwitcher_Button"]` returns the user's profile
+5. Active session: a `Runtime.evaluate` for `[data-testid="SideNav_AccountSwitcher_Button"]` returns the user's profile
 6. Inside `windows.yaml: x.inbound`
 7. Today's reply count below `caps.yaml: x.inbound.replies_per_day`
 
