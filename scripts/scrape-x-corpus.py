@@ -71,15 +71,32 @@ EXTRACT_JS = r"""
 """
 
 
+def _load_existing(path: Path) -> list[dict]:
+    if not path.exists():
+        return []
+    out = []
+    for line in path.read_text().splitlines():
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            out.append(json.loads(line))
+        except json.JSONDecodeError:
+            pass
+    return out
+
+
 async def main_async(handle: str, limit: int):
     tab = find_x_tab()
     async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
         await cdp_call(ws, 1, "Page.navigate", {"url": f"https://x.com/{handle}/with_replies"})
         await asyncio.sleep(6)
 
-        seen_urls = set()
-        replies: list[dict] = []
-        posts: list[dict] = []
+        # Load prior records so the scraper appends+dedupes instead of clobbering.
+        replies: list[dict] = _load_existing(CORPUS / "x_replies.jsonl")
+        posts: list[dict] = _load_existing(CORPUS / "x_posts.jsonl")
+        seen_urls: set = {r.get("url") for r in replies + posts if r.get("url")}
+        baseline = len(replies) + len(posts)
         last_count = -1
         stuck = 0
 
@@ -107,7 +124,8 @@ async def main_async(handle: str, limit: int):
                     posts.append(rec)
 
             print(f"  scroll {scroll_iter+1}: replies={len(replies)} posts={len(posts)}")
-            if len(replies) + len(posts) >= limit:
+            # `limit` is the number of NEW records we want this run, not total.
+            if (len(replies) + len(posts)) - baseline >= limit:
                 break
             if len(seen_urls) == last_count:
                 stuck += 1
