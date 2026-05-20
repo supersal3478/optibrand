@@ -15,6 +15,13 @@ You need three things installed system-wide before `setup.sh` can run:
 
 Optional but useful: `brew install ripgrep jq` (Hermes uses ripgrep for code search; jq is handy for inspecting state).
 
+You also need **`cua-driver`** (the X read path uses it for the macOS Accessibility API):
+
+1. Download the **Rust-port binary** (`v0.1.x`) from the cua releases page. The Swift port `v0.1.9+` requires macOS 14 (Sonoma); on Monterey/Ventura the Rust port is the only thing that works.
+2. `chmod +x ~/.local/bin/cua-driver`
+3. **Grant Accessibility permission:** System Settings → Privacy & Security → Accessibility → click the lock to edit → drag `cua-driver` in → toggle on. Without this, every accessibility read will silently return empty arrays.
+4. Verify: `cua-driver --version` should print `cua-driver 0.1.x`.
+
 ## 1. Clone and bootstrap
 
 ```bash
@@ -131,10 +138,17 @@ Even 30 records of each is enough to bootstrap.
 ## 6. Build your voice profile
 
 ```bash
-python scripts/voice-train.py
+./scripts/voice-train.py
 ```
 
-Reads `corpus/*.jsonl` + `BRAND.md`, emits `~/.hermes/memory/voice_profile.json`. Re-runs weekly on cron.
+Reads `corpus/_normalized.jsonl` + `BRAND.md`, dispatches a one-shot Hermes session that runs the `voice-profile` skill, and emits `~/.hermes/memories/voice_profile.json`. Validates the JSON before exiting. Re-runs weekly on cron via the `voice_retrain` entry in `schedule.yaml`.
+
+If the script reports `BRAND.md still has empty template placeholders`, finish step 4 first. If it reports `corpus has fewer than 5 records`, finish step 5 first.
+
+Quick dry-run that just checks inputs without calling the LLM:
+```bash
+./scripts/voice-train.py --dry-run
+```
 
 ## 7. Set your schedule
 
@@ -163,19 +177,81 @@ lipy inbound --since "2026-04-01T00:00:00Z" --limit 5
 
 Both should emit real JSON about your account. If either fails, see the troubleshooting table at the bottom.
 
-## 9. Start the daemon
+## 9. Arm autonomy mode
 
-When you're confident:
+This is the deliberate switch from "scaffold runs, nothing posts" to "agent is making real decisions on real comments." Read [scripts/autonomy-mode.sh](scripts/autonomy-mode.sh) before running it — it changes production behavior.
+
+```bash
+./scripts/autonomy-mode.sh --dry-run     # show what would change
+./scripts/autonomy-mode.sh               # default: CDP path for X, 30-min review hold buffer
+```
+
+What this does:
+
+1. Validates BRAND.md is filled, voice_profile.json exists, lipy session is warmed, CDP Chrome is running.
+2. Flips `config/caps.yaml` to `phase: 2` and `linkedin.live: true` + `x.live: true`. (Original backed up to `caps.yaml.bak`.)
+3. Sets `hold_buffer_inbound_seconds: 1800` — every draft queues for 30 minutes before posting, so you can yank from the dashboard. Pass `--no-hold` to skip and post immediately (not recommended for week 1).
+4. Sets X approval gate based on `--x-path={cdp,api}` (default `cdp`, which bypasses the API requirement since we drive Chrome directly).
+5. Creates a minimal `schedule.yaml` if absent.
+6. Registers two Hermes cron jobs at 15-minute offset cadence:
+   - `li-inbound` — minute 0 and 30 of every hour
+   - `x-inbound` — minute 15 and 45 of every hour
+
+  Resulting timeline during business hours (per `config/windows.yaml`):
+
+  | Minute | Action |
+  |---|---|
+  | :00 | LinkedIn inbound poll |
+  | :15 | X inbound poll |
+  | :30 | LinkedIn inbound poll |
+  | :45 | X inbound poll |
+
+To halt instantly at any time: edit `config/caps.yaml` and flip `linkedin.live` or `x.live` to `false`. Caps are re-read every tick, no restart needed.
+
+## 10. Start the daemon
 
 ```bash
 hermes gateway start
-```
-
-This is the autonomous loop. It reads `schedule.yaml`, fires pre-post engagement, monitors after-post comments, runs the daily report. Watch with:
-
-```bash
 hermes logs --follow
 ```
+
+Smoke-test each cron job once manually before letting cron tick on its own:
+```bash
+hermes cron run li-inbound
+hermes cron run x-inbound
+```
+Inspect the drafts that land in the queue. If brand-guard rejects everything, BRAND.md is too strict; if it lets through obviously off-brand replies, BRAND.md is too loose.
+
+## 11. Persist the daemon across reboots
+
+The Hermes gateway dies when you log out or reboot. To keep it alive automatically:
+
+```bash
+# 1. Edit the launchd plist template — replace __HOME__ with your actual home dir
+sed -i '' "s|__HOME__|$HOME|g" config/launchd/com.brandgrowthengine.hermes.plist
+
+# 2. Install
+cp config/launchd/com.brandgrowthengine.hermes.plist ~/Library/LaunchAgents/
+launchctl load ~/Library/LaunchAgents/com.brandgrowthengine.hermes.plist
+
+# 3. Verify
+launchctl list | grep brandgrowthengine
+```
+
+To unload: `launchctl unload ~/Library/LaunchAgents/com.brandgrowthengine.hermes.plist`.
+
+Stdout/stderr land at `~/.hermes/logs/launchd-stdout.log` and `launchd-stderr.log`.
+
+### MacBook lid-close
+
+launchd keeps the daemon alive, but **macOS will still sleep when you close the lid** and put the process into power-naps. Either:
+
+```bash
+sudo pmset -a sleep 0          # never sleep when on AC
+sudo pmset -a disablesleep 1   # never sleep even with lid closed (use cautiously)
+```
+
+Or — cleaner — dedicate an always-plugged Mac to running the engine.
 
 ## Daily report
 
@@ -199,6 +275,12 @@ It summarizes:
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `setup.sh` fails on `pip install -e hermes-agent` | Python 3.11+ not found | `brew install python@3.14`, then re-run |
+| `cua-driver` returns empty arrays for every read | Accessibility permission not granted | System Settings → Privacy & Security → Accessibility → add `cua-driver` + toggle on |
+| `voice-train.py` reports `BRAND.md still has empty template placeholders` | Step 4 not done | `$EDITOR BRAND.md` and replace placeholders |
+| `voice-train.py` succeeds but the JSON is missing keys | LLM didn't follow the schema | Re-run; if persistent, switch model in `~/.hermes/.env` |
+| `autonomy-mode.sh` says voice profile missing | Wrote to wrong path (singular `memory/`) | Move to `~/.hermes/memories/voice_profile.json` (plural — Hermes convention) |
+| Cron jobs don't fire | Gateway not running | `hermes gateway start` or load the launchd plist |
+| Cron ticks happen but nothing posts | `caps.yaml live: false` or hold buffer not cleared | Check `~/.hermes/queue/`; flip `caps.yaml live` after reviewing queued drafts |
 | `start-chrome-cdp` says "Chrome didn't expose CDP" | Existing Chrome instance with same `--user-data-dir` | Quit all Chrome windows, retry |
 | `lipy status` returns `auth_required` | LinkedIn session expired | `lipy login --headed` again |
 | `lipy inbound` returns `playwright_not_installed` | Old symlink from pre-fix install | `cd skills/linkedin-engage && ./install.sh` (writes the wrapper now) |
@@ -219,7 +301,7 @@ It summarizes:
 | `~/.hermes/state/` | Browser profiles, session cookies, OAuth tokens |
 | `~/.hermes/logs/audit.jsonl` | Every action the agent takes — one line per action |
 | `~/.hermes/reports/` | Daily reports |
-| `~/.hermes/memory/voice_profile.json` | Distilled voice from corpus |
+| `~/.hermes/memories/voice_profile.json` | Distilled voice from corpus |
 
 ## What to do when you're not sure
 

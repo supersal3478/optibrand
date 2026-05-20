@@ -60,6 +60,17 @@ else
   warn "Chrome not at $CHROME_BIN — install from https://google.com/chrome before running x-engage."
 fi
 
+CUA_DRIVER="$LOCAL_BIN/cua-driver"
+if [[ -x "$CUA_DRIVER" ]]; then
+  CUA_VER="$("$CUA_DRIVER" --version 2>/dev/null | head -1 || echo unknown)"
+  ok "cua-driver found: $CUA_VER"
+else
+  warn "cua-driver not at $CUA_DRIVER — required for x-engage read path (Accessibility API)."
+  warn "  Install: download the Rust binary from https://github.com/trycua/cua releases"
+  warn "          (use the v0.1.x Rust port — Swift port v0.1.9+ requires macOS 14+)."
+  warn "  Then:    chmod +x $CUA_DRIVER && grant Accessibility permission in System Settings."
+fi
+
 # ─────────────────────────── 2. Hermes Agent ───────────────────────────
 step "Restoring vendor/hermes-agent"
 
@@ -100,7 +111,7 @@ mkdir -p \
   "$HERMES_HOME/state/playwright/linkedin" \
   "$HERMES_HOME/logs" \
   "$HERMES_HOME/reports" \
-  "$HERMES_HOME/memory"
+  "$HERMES_HOME/memories"
 ok "state dirs under $HERMES_HOME"
 
 # ─────────────────────────── 6. Skill symlinks ───────────────────────────
@@ -159,15 +170,29 @@ $(c_yellow 'NEXT STEPS — do these once on this laptop:')
      See corpus/README.md for formats. Even 30 LinkedIn comments is enough to
      bootstrap; more = better voice fidelity.
 
-  6. $(c_blue 'Set your schedule.') Copy and edit the example:
+  6. $(c_blue 'Generate your voice profile.') With BRAND.md filled + corpus present:
+       ./scripts/voice-train.py
+     Writes $HERMES_HOME/memories/voice_profile.json. Required before reply-drafter
+     will produce anything.
+
+  7. $(c_blue 'Set your schedule.') Copy and edit the example:
        cp schedule.example.yaml schedule.yaml
      Then \$EDITOR schedule.yaml.
 
-  7. $(c_blue 'Smoke test.') Verify both pipelines:
+  8. $(c_blue 'Smoke test.') Verify both pipelines:
        lipy status
        start-chrome-cdp && curl -s http://localhost:9222/json/version
+
+  9. $(c_blue 'Enable autonomous mode (deliberate step):')
+       ./scripts/autonomy-mode.sh
+     Flips caps.yaml to phase 2, fixes timezone, creates the LinkedIn + X
+     inbound cron jobs at 15-minute offset, and prints next steps for
+     starting the gateway daemon. Read the script first — it changes
+     real production behavior.
 
 When ready: $(c_blue 'hermes')  (interactive chat)
             $(c_blue 'hermes cron list')  (scheduled jobs)
             $(c_blue 'hermes gateway start')  (autonomous daemon)
+            $(c_blue 'launchctl load ~/Library/LaunchAgents/com.brandgrowthengine.hermes.plist')
+              (persistent daemon across reboots — see config/launchd/)
 EOF

@@ -220,3 +220,31 @@ To go from current state → autonomous polling with the cadence Sal asked for:
 ---
 
 **Bottom line:** the artifacts are ready (BRAND.md, voice_profile.json, skills, sessions, CDP Chrome). The autonomy gap is ~10 concrete steps, mostly config flips and one manual end-to-end dry-run. Realistically half a day of work, gated on Sal's comfort with each switch-flip.
+
+---
+
+## Postscript — 2026-05-20 (production-readiness pass)
+
+After the gap analysis above was written, the same session closed most of the gaps in tooling so a fresh laptop can reach the same state without re-running this analysis. What changed:
+
+| Gap from above | Resolution |
+|---|---|
+| `windows.yaml` timezone wrong | Set to `America/Toronto` directly in [config/windows.yaml](../config/windows.yaml). |
+| Path inconsistency (`memory/` vs `memories/`) | Standardized to `memories/` (plural) — Hermes' own convention. Fixed [setup.sh](../setup.sh), [ONBOARDING.md](../ONBOARDING.md), [scripts/voice-train.py](../scripts/voice-train.py), [corpus/README.md](../corpus/README.md). |
+| `caps.yaml phase: 0` flip needs manual edit | [scripts/autonomy-mode.sh](../scripts/autonomy-mode.sh) does it in one command — re-runnable, dry-run-able, idempotent. Backs up to `caps.yaml.bak`. |
+| X approval gate decision | `autonomy-mode.sh --x-path={cdp,api}` makes this explicit. |
+| Hold-buffer policy for week 1 | `autonomy-mode.sh` defaults to 1800s; `--no-hold` opts out. |
+| Hermes gateway not persistent | [config/launchd/com.brandgrowthengine.hermes.plist](../config/launchd/com.brandgrowthengine.hermes.plist) template + install instructions in ONBOARDING.md §11. |
+| cua-driver install missing from setup | setup.sh now checks for it and warns with install steps; ONBOARDING.md §0 has full instructions including macOS Accessibility permission. |
+| End-to-end loop never observed | autonomy-mode.sh prints next steps: `hermes cron run li-inbound`, `hermes cron run x-inbound` for manual dry-runs before letting cron tick. |
+| Voice profile generation unreproducible | [scripts/voice-train.py](../scripts/voice-train.py) rewritten with input validation, schema validation, timeout, and clear error codes. Dispatches `hermes chat -q --skills voice-profile`. |
+| No cron schedule | autonomy-mode.sh registers `li-inbound` (0,30) and `x-inbound` (15,45) at the 15-min-offset cadence Sal asked for. |
+
+What's still manual (and unavoidably so):
+- LinkedIn login (`lipy login --headed`) — 2FA can't be automated.
+- X login (`start-chrome-cdp` then manual login in the window) — same reason.
+- macOS Accessibility permission for `cua-driver` — System Settings, user-driven.
+- API keys in `~/.hermes/.env` — secrets, don't go in repo.
+- `pmset` sleep config — requires `sudo`, user decision.
+
+**Net:** a fresh laptop can now go from `git clone` → `./setup.sh` → manual logins → `./scripts/voice-train.py` → `./scripts/autonomy-mode.sh` → autonomous polling. Roughly 30–60 minutes of work, almost all of it waiting for installs and manual logins.

@@ -1,6 +1,6 @@
 # corpus/
 
-Voice training data. Drop your platform exports here as JSON Lines. The `corpus-ingest` skill reads everything in this folder once at Phase 0 and seeds `~/.hermes/memory/voice_profile.json`. The `voice-profile` skill re-trains weekly using this folder + sent replies.
+Voice training data. Drop your platform exports here as JSON Lines. The `corpus-ingest` skill reads everything in this folder once at Phase 0 and seeds `~/.hermes/memories/voice_profile.json`. The `voice-profile` skill re-trains weekly using this folder + sent replies.
 
 ## Expected files
 

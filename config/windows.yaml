@@ -27,4 +27,4 @@ linkedin:
     start: "09:00"
     end:   "17:00"
 
-timezone: America/Los_Angeles    # adjust to user's TZ
+timezone: America/Toronto    # IANA name; matches BGE_TIMEZONE in ~/.hermes/.env

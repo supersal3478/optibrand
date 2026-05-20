@@ -1,0 +1,72 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Persistent Hermes gateway for brand-growth-engine.
+
+  Install:
+    1. cp config/launchd/com.brandgrowthengine.hermes.plist ~/Library/LaunchAgents/
+    2. Edit the copy: replace __HOME__ with your home dir (e.g. /Users/youruser).
+       (We can't use literal $HOME here — launchd doesn't expand env vars in
+        ProgramArguments.)
+    3. launchctl load ~/Library/LaunchAgents/com.brandgrowthengine.hermes.plist
+
+  Verify:
+    launchctl list | grep brandgrowthengine
+
+  Halt:
+    launchctl unload ~/Library/LaunchAgents/com.brandgrowthengine.hermes.plist
+
+  Logs:
+    ~/.hermes/logs/launchd-stdout.log
+    ~/.hermes/logs/launchd-stderr.log
+
+  Note: this keeps the Hermes gateway DAEMON alive. It does not bypass macOS
+  sleep — see pmset commands in scripts/autonomy-mode.sh output for that.
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key>
+  <string>com.brandgrowthengine.hermes</string>
+
+  <key>ProgramArguments</key>
+  <array>
+    <string>__HOME__/Desktop/projects/brand-growth-engine/vendor/hermes-agent/.venv/bin/hermes</string>
+    <string>gateway</string>
+    <string>start</string>
+    <string>--foreground</string>
+  </array>
+
+  <key>WorkingDirectory</key>
+  <string>__HOME__/Desktop/projects/brand-growth-engine</string>
+
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>HOME</key>
+    <string>__HOME__</string>
+    <key>HERMES_HOME</key>
+    <string>__HOME__/.hermes</string>
+    <key>PATH</key>
+    <string>__HOME__/.local/bin:/usr/local/bin:/usr/bin:/bin</string>
+  </dict>
+
+  <key>RunAtLoad</key>
+  <true/>
+
+  <key>KeepAlive</key>
+  <dict>
+    <key>SuccessfulExit</key>
+    <false/>
+    <key>Crashed</key>
+    <true/>
+  </dict>
+
+  <key>StandardOutPath</key>
+  <string>__HOME__/.hermes/logs/launchd-stdout.log</string>
+
+  <key>StandardErrorPath</key>
+  <string>__HOME__/.hermes/logs/launchd-stderr.log</string>
+
+  <key>ProcessType</key>
+  <string>Background</string>
+</dict>
+</plist>
