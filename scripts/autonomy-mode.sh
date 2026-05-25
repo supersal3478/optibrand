@@ -149,21 +149,35 @@ else
 fi
 
 # ─── 4. Cron jobs ─────────────────────────────────────────────────
-step "Registering Hermes cron jobs (15-min offset cadence)"
+step "Registering Hermes cron jobs (schedule-tick + daily-report + voice-retrain)"
 
-LI_PROMPT="Run the linkedin-engage inbound pass. Use lipy inbound to fetch new comments on my recent LinkedIn posts since the last run. For each new comment: draft a reply via reply-drafter (it will load voice_profile.json + BRAND.md), validate via brand-guard, and queue (do NOT post directly — let the hold buffer in caps.yaml apply). Respect config/windows.yaml — skip the entire pass if outside the linkedin inbound window. Apply config/jitter.yaml delays between actions. Append every outcome to ~/.hermes/memories/sent_replies.jsonl."
+# The schedule-tick orchestrator is the single source of truth for what runs
+# when. It reads schedule.yaml every minute and decides: publish, monitor-poll,
+# inbound-reply-post (after hold-buffer flush), daily report, weekly retrain.
+# All caps/windows enforcement happens inside the tick — primitives stay dumb.
+TICK_PROMPT="Run scripts/schedule-tick.py from $PROJECT_ROOT. It is a Python orchestrator (not an LLM prompt) — invoke it as a subprocess: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python scripts/schedule-tick.py. Do NOT modify the prompt; the tick handles everything."
 
-X_PROMPT="Run the x-engage inbound pass. Ensure the CDP Chrome at :9222 is up (start-chrome-cdp if not). Use cdp_eval.py to read x.com/notifications/mentions and the user's recent post threads for new replies/mentions since the last run. For each new item: draft a reply via reply-drafter, validate via brand-guard, and queue (do NOT post directly). Respect config/windows.yaml. Apply config/jitter.yaml. Append every outcome to ~/.hermes/memories/sent_replies.jsonl."
+REPORT_PROMPT="Run scripts/daily-report.py from $PROJECT_ROOT. Invoke as: $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/daily-report.py. Writes ~/.hermes/reports/YYYY-MM-DD.md from the audit log."
 
-# Remove existing jobs if present, then add fresh.
+RETRAIN_PROMPT="Run scripts/voice-train.py --retrain from $PROJECT_ROOT. Invoke as: $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/voice-train.py --retrain. Weights original corpus 2x over agent-generated sent_replies.jsonl."
+
+# Remove old jobs if present, then add fresh. The schedule-tick job replaces
+# both li-inbound (0,30) and x-inbound (15,45) — schedule.yaml now drives
+# everything via per-minute ticks.
 run "$HERMES_BIN cron remove li-inbound 2>/dev/null || true"
 run "$HERMES_BIN cron remove x-inbound 2>/dev/null || true"
+run "$HERMES_BIN cron remove schedule-tick 2>/dev/null || true"
+run "$HERMES_BIN cron remove daily-report 2>/dev/null || true"
+run "$HERMES_BIN cron remove voice-retrain 2>/dev/null || true"
 
-run "$HERMES_BIN cron add --name li-inbound --schedule '0,30 * * * *' --prompt '$LI_PROMPT'"
-ok "li-inbound: minute 0,30 every hour"
+run "$HERMES_BIN cron add --name schedule-tick --schedule '* * * * *' --prompt '$TICK_PROMPT'"
+ok "schedule-tick: every minute (reads schedule.yaml + caps.yaml + windows.yaml)"
 
-run "$HERMES_BIN cron add --name x-inbound --schedule '15,45 * * * *' --prompt '$X_PROMPT'"
-ok "x-inbound: minute 15,45 every hour"
+run "$HERMES_BIN cron add --name daily-report --schedule '55 23 * * *' --prompt '$REPORT_PROMPT'"
+ok "daily-report: 23:55 every day"
+
+run "$HERMES_BIN cron add --name voice-retrain --schedule '0 2 * * 0' --prompt '$RETRAIN_PROMPT'"
+ok "voice-retrain: Sunday 02:00"
 
 # ─── 5. Summary ─────────────────────────────────────────────────
 cat <<EOF
@@ -176,14 +190,13 @@ Configuration applied:
   • phase=2, linkedin.live=true, x.live=true
   • hold_buffer_inbound_seconds=${HOLD_BUFFER} ($([ "$HOLD_BUFFER" = "0" ] && echo 'immediate post' || echo 'review queue'))
   • X path: ${X_PATH}
-  • Two cron jobs registered (li-inbound 0,30; x-inbound 15,45)
+  • Three cron jobs registered: schedule-tick (* * * * *), daily-report (55 23 * * *), voice-retrain (0 2 * * 0)
 
 $(c_yellow 'NEXT STEPS:')
 
-  1. $(c_blue 'Smoke-test each job manually before letting cron tick:')
-       hermes cron run li-inbound
-       hermes cron run x-inbound
-     Inspect the drafts that land in the review queue.
+  1. $(c_blue 'Smoke-test the tick manually before letting cron drive it:')
+       $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/schedule-tick.py --dry-run --verbose
+     Inspect any drafts that land in ~/.hermes/queue/.
 
   2. $(c_blue 'Start the gateway daemon:')
        hermes gateway start

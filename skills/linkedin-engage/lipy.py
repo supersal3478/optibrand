@@ -928,8 +928,37 @@ def cmd_comments(args: argparse.Namespace) -> int:
         if not ok:
             return _err(reason)
         comments = _scrape_comments(page, args.post, args.max_load)
-    json.dump({"ok": True, "post_urn": args.post,
-               "count": len(comments), "comments": comments}, sys.stdout)
+
+    new_comments = comments
+    state_info = None
+    if args.since_state:
+        state_path = Path(args.since_state)
+        prior_seen: set[str] = set()
+        if state_path.exists():
+            try:
+                prior = json.loads(state_path.read_text())
+                prior_seen = set(prior.get("seen_urns", []) or [])
+            except (json.JSONDecodeError, OSError):
+                prior_seen = set()
+        new_comments = [c for c in comments if c.get("urn") and c["urn"] not in prior_seen]
+        # Persist updated seen set: prior + everything we just observed.
+        all_seen = sorted(prior_seen | {c["urn"] for c in comments if c.get("urn")})
+        state_path.parent.mkdir(parents=True, exist_ok=True)
+        state_path.write_text(json.dumps({
+            "post_urn": args.post,
+            "seen_urns": all_seen,
+            "last_checked": time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime()),
+        }, indent=2))
+        state_info = {"prior_seen": len(prior_seen), "now_seen": len(all_seen)}
+
+    json.dump({
+        "ok": True,
+        "post_urn": args.post,
+        "count": len(comments),
+        "comments": comments,
+        "new_comments": new_comments,
+        "since_state": state_info,
+    }, sys.stdout)
     return 0
 
 
@@ -1312,6 +1341,194 @@ def cmd_reply(args: argparse.Namespace) -> int:
         return 0
 
 
+# ─── publish (new posts) ──────────────────────────────────────────────────────
+
+
+def _find_start_post_button(page, timeout_ms: int = 8000):
+    """The 'Start a post' button at the top of the feed.
+
+    LinkedIn has rolled multiple variants; try several in order.
+    """
+    selectors = (
+        'button[aria-label*="Start a post" i]',
+        'button:has-text("Start a post")',
+        '[role="button"][aria-label*="Start a post" i]',
+        'button.share-box-feed-entry__trigger',
+    )
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        for sel in selectors:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    return el
+            except Exception:
+                pass
+        time.sleep(0.25)
+    return None
+
+
+def _find_publish_modal_textbox(page, timeout_ms: int = 10_000):
+    """The contenteditable composer that appears in the publish modal."""
+    selectors = (
+        'div[role="dialog"] div[role="textbox"][contenteditable="true"]',
+        'div[role="dialog"] div.ql-editor[contenteditable="true"]',
+        'div[role="dialog"] div[aria-label*="text editor" i][contenteditable="true"]',
+        'div[role="dialog"] div[data-placeholder][contenteditable="true"]',
+    )
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        for sel in selectors:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    return el
+            except Exception:
+                pass
+        time.sleep(0.25)
+    return None
+
+
+def _find_publish_post_button(page, timeout_ms: int = 4000):
+    """The 'Post' submit button inside the publish modal (NOT the inline 'Comment' button)."""
+    selectors = (
+        'div[role="dialog"] button.share-actions__primary-action',
+        'div[role="dialog"] button[aria-label="Post" i]',
+        'div[role="dialog"] button:has-text("Post")',
+    )
+    deadline = time.time() + timeout_ms / 1000
+    while time.time() < deadline:
+        for sel in selectors:
+            try:
+                el = page.query_selector(sel)
+                if el and el.is_visible():
+                    aria = (el.get_attribute("aria-disabled") or "").lower()
+                    disabled = el.get_attribute("disabled")
+                    if aria != "true" and disabled is None:
+                        return el
+            except Exception:
+                pass
+        time.sleep(0.25)
+    return None
+
+
+def _extract_newest_post_urn(page) -> tuple[str | None, str | None]:
+    """After publishing, scroll the feed to the top and pull the first own post's URNs.
+    Returns (activity_urn, ugc_urn). Either may be None on failure."""
+    try:
+        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20_000)
+        time.sleep(2.5)
+    except Exception:
+        pass
+    try:
+        # Scroll to top so the most-recent own post is visible.
+        page.evaluate("window.scrollTo(0, 0)")
+        time.sleep(1.0)
+    except Exception:
+        pass
+    # Look in the first few feed cards for one whose URN belongs to the current user.
+    # The cards expose data-urn="urn:li:activity:..." or "urn:li:ugcPost:..." on their
+    # outer wrapper.
+    try:
+        urns = page.evaluate(
+            "() => Array.from(document.querySelectorAll('[data-urn^=\"urn:li:activity:\"], "
+            "[data-urn^=\"urn:li:ugcPost:\"]')).slice(0, 5).map(e => e.getAttribute('data-urn'))"
+        ) or []
+    except Exception:
+        urns = []
+    activity = next((u for u in urns if isinstance(u, str) and u.startswith("urn:li:activity:")), None)
+    ugc = next((u for u in urns if isinstance(u, str) and u.startswith("urn:li:ugcPost:")), None)
+    return activity, ugc
+
+
+def cmd_publish(args: argparse.Namespace) -> int:
+    """Publish a new post to LinkedIn from a markdown file.
+
+    Defaults to --dry-run (types into the composer but does not click Post).
+    Pass --live to submit.
+    """
+    ha = _import_human_actions()
+    submit_for_real = bool(args.live)
+
+    path = Path(args.file)
+    if not path.exists():
+        return _err("draft_file_missing", path=str(path))
+    text = path.read_text().strip()
+    if not text:
+        return _err("draft_file_empty", path=str(path))
+    if len(text) > 2900:  # LinkedIn post limit is 3000; leave a little headroom
+        return _err("draft_too_long", chars=len(text), max=2900)
+
+    with linkedin_session(headed=args.headed, save_on_exit=True) as (_b, _c, page):
+        ok, reason, _ = _check_auth(page)
+        if not ok:
+            return _err(reason)
+
+        page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded", timeout=20_000)
+        ha.dwell(1.2, 2.8)
+        ha.smooth_scroll(page, 200)
+        ha.dwell(0.6, 1.4)
+
+        start_btn = _find_start_post_button(page)
+        if not start_btn:
+            return _err("start_post_button_not_found")
+
+        ha.human_click(page, start_btn)
+        ha.dwell(1.5, 2.5)  # modal opens
+
+        textbox = _find_publish_modal_textbox(page)
+        if not textbox:
+            return _err("publish_composer_not_found")
+
+        try:
+            textbox.click(timeout=2000)
+        except Exception:
+            pass
+        ha.dwell(0.3, 0.7)
+        ha.human_type(page, text)
+        ha.consider_dwell()
+
+        if not submit_for_real:
+            try:
+                typed = textbox.inner_text()
+            except Exception:
+                typed = ""
+            json.dump({
+                "ok": True,
+                "dry_run": True,
+                "draft_path": str(path),
+                "chars": len(text),
+                "typed_in_box_preview": typed[:300],
+                "note": "Pass --live to actually submit.",
+            }, sys.stdout)
+            return 0
+
+        submit_btn = _find_publish_post_button(page)
+        if not submit_btn:
+            return _err("publish_submit_button_not_found",
+                        note="typed into the composer but couldn't find an enabled Post button")
+        ha.dwell(0.7, 1.5)
+        ha.human_click(page, submit_btn)
+        ha.dwell(3.0, 5.0)
+
+        # Best-effort URN capture: navigate to feed and grab the newest own post.
+        activity_urn, ugc_urn = _extract_newest_post_urn(page)
+        post_url = (f"https://www.linkedin.com/feed/update/{activity_urn}/"
+                    if activity_urn else None)
+        if activity_urn or ugc_urn:
+            _remember_urn(activity_urn=activity_urn, ugc_urn=ugc_urn, post_text=text[:400])
+
+        json.dump({
+            "ok": True,
+            "dry_run": False,
+            "draft_path": str(path),
+            "chars": len(text),
+            "post_urn": activity_urn or ugc_urn or "",
+            "post_url": post_url or "",
+        }, sys.stdout)
+        return 0
+
+
 def _scrape_my_comments(page, limit: int, debug: bool = False) -> list[dict]:
     """Scrape the user's own outbound comment history from
     /in/me/recent-activity/comments/. Each entry is a card showing the user's
@@ -1555,6 +1772,10 @@ def main() -> int:
     comments.add_argument("--max-load", type=int, default=10,
                           help="max clicks on 'Load more comments'")
     comments.add_argument("--headed", action="store_true")
+    comments.add_argument("--since-state", default=None,
+                          help="JSON state file persisting seen comment URNs. When supplied, "
+                               "the output's 'new_comments' field returns only comments not "
+                               "in the prior state, and the state file is updated.")
     comments.set_defaults(fn=cmd_comments)
 
     my_comments = sp.add_parser("my-comments",
@@ -1600,6 +1821,18 @@ def main() -> int:
     reply.add_argument("--live", action="store_true",
                        help="actually submit (overrides --dry-run)")
     reply.set_defaults(fn=cmd_reply)
+
+    publish = sp.add_parser("publish",
+        help="Publish a new top-level post from a markdown file (human-emulated).")
+    publish.add_argument("--file", required=True, help="Path to markdown draft.")
+    publish.add_argument("--headed", action="store_true", default=True,
+                         help="visible browser (default; safer for writes)")
+    publish.add_argument("--headless", dest="headed", action="store_false")
+    publish.add_argument("--dry-run", action="store_true", default=True,
+                         help="default: type but do NOT submit")
+    publish.add_argument("--live", action="store_true",
+                         help="actually submit (overrides --dry-run)")
+    publish.set_defaults(fn=cmd_publish)
 
     comment = sp.add_parser("comment", help="Top-level comment on a post (human-emulated).")
     comment.add_argument("--post", required=True,

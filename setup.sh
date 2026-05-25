@@ -143,56 +143,14 @@ $(c_green '═══════════════════════
 $(c_green '  Bootstrap complete.')
 $(c_green '════════════════════════════════════════════════════════════════')
 
-$(c_yellow 'NEXT STEPS — do these once on this laptop:')
+$(c_yellow 'NEXT STEP — one command from here:')
 
-  1. $(c_blue 'Add credentials.') Open the env file and fill it in:
-       \$EDITOR $HERMES_HOME/.env
-     Minimum to start: AZURE_FOUNDRY_API_KEY + AZURE_FOUNDRY_BASE_URL
-     (or ANTHROPIC_API_KEY if using direct Anthropic).
+  $(c_blue './scripts/bootstrap.sh')
 
-  2. $(c_blue 'Log into X.') Launch the dedicated CDP Chrome:
-       start-chrome-cdp
-     Then in that Chrome window: navigate to x.com, log in with your account,
-     complete 2FA if asked. The login persists in ~/.hermes/state/chrome-cdp/.
+This walks every remaining manual gate (cua-driver + Accessibility, LLM
+credentials, BRAND.md fill check, X login, LinkedIn login, voice profile,
+schedule.yaml, autonomy arm, launchd persistence) with validation between
+each. Idempotent — safe to re-run if you stop part-way.
 
-  3. $(c_blue 'Log into LinkedIn.') Run:
-       lipy login --headed
-     This opens a chromium window. Log in normally (incl. 2FA). The session
-     cookie is saved in ~/.hermes/state/playwright/linkedin/.
-
-  4. $(c_blue 'Fill in BRAND.md.') Open:
-       $PROJECT_ROOT/BRAND.md
-     and replace every placeholder. This is the single most load-bearing file
-     in the project — every drafted reply is validated against it.
-
-  5. $(c_blue 'Add voice corpus.') Drop your platform exports into:
-       $PROJECT_ROOT/corpus/
-     See corpus/README.md for formats. Even 30 LinkedIn comments is enough to
-     bootstrap; more = better voice fidelity.
-
-  6. $(c_blue 'Generate your voice profile.') With BRAND.md filled + corpus present:
-       ./scripts/voice-train.py
-     Writes $HERMES_HOME/memories/voice_profile.json. Required before reply-drafter
-     will produce anything.
-
-  7. $(c_blue 'Set your schedule.') Copy and edit the example:
-       cp schedule.example.yaml schedule.yaml
-     Then \$EDITOR schedule.yaml.
-
-  8. $(c_blue 'Smoke test.') Verify both pipelines:
-       lipy status
-       start-chrome-cdp && curl -s http://localhost:9222/json/version
-
-  9. $(c_blue 'Enable autonomous mode (deliberate step):')
-       ./scripts/autonomy-mode.sh
-     Flips caps.yaml to phase 2, fixes timezone, creates the LinkedIn + X
-     inbound cron jobs at 15-minute offset, and prints next steps for
-     starting the gateway daemon. Read the script first — it changes
-     real production behavior.
-
-When ready: $(c_blue 'hermes')  (interactive chat)
-            $(c_blue 'hermes cron list')  (scheduled jobs)
-            $(c_blue 'hermes gateway start')  (autonomous daemon)
-            $(c_blue 'launchctl load ~/Library/LaunchAgents/com.brandgrowthengine.hermes.plist')
-              (persistent daemon across reboots — see config/launchd/)
+If you'd rather do it by hand, see ONBOARDING.md for the full step-by-step.
 EOF
