@@ -11,6 +11,32 @@ cd brand-growth-engine
 
 That's it. `bootstrap.sh` is idempotent — re-running picks up at the first un-passed gate.
 
+## Stage 0 — system-level prereqs (do these BEFORE `./setup.sh`)
+
+`setup.sh` will fail fast if any of these are missing. Run them once on a brand-new Mac:
+
+```bash
+# 1. Xcode Command Line Tools (provides git)
+xcode-select --install
+
+# 2. Homebrew (provides everything else)
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
+
+# 3. Python 3.11+ (3.14 recommended)
+brew install python@3.14
+
+# 4. Google Chrome — download from https://google.com/chrome
+#    (Chrome is required by the X workflow; setup.sh checks for it at
+#    /Applications/Google Chrome.app/Contents/MacOS/Google Chrome.)
+```
+
+Optional but useful: `brew install ripgrep jq`.
+
+You also need to bring **two pieces of information** that can't come from git:
+
+- **Your LLM API key** — Azure (`AZURE_FOUNDRY_API_KEY` + `AZURE_FOUNDRY_BASE_URL`), Anthropic, or OpenRouter. bootstrap.sh's stage 3 opens `~/.hermes/.env` in `$EDITOR` and **live-validates the key** with a curl before continuing.
+- **Your LinkedIn + X 2FA factor** — your authenticator app or SMS device. bootstrap.sh's stages 5 & 6 open browser windows where you log in manually.
+
 ## What each stage does
 
 `bootstrap.sh` walks 12 gates with validation between each:
@@ -37,19 +63,6 @@ Bypass flags (use sparingly):
 ./scripts/bootstrap.sh --skip-x      # skip cua-driver + X login (e.g., a LinkedIn-only laptop)
 ./scripts/bootstrap.sh --skip-li     # skip LinkedIn login (e.g., an X-only laptop)
 ```
-
-## Prerequisites before `setup.sh`
-
-Three things have to be on the system already:
-
-| Thing | How |
-|---|---|
-| macOS 12+ (Monterey or later) | — |
-| Python 3.11+ | `brew install python@3.14` |
-| Google Chrome | https://google.com/chrome |
-| git | `xcode-select --install` |
-
-Optional but useful: `brew install ripgrep jq`.
 
 ## How the loop runs after bootstrap
 

@@ -53,7 +53,7 @@ pause() {
   read -r _
 }
 
-# ─── 1. Verify setup.sh has been run ──────────────────────────────
+# ─── 1. Verify setup.sh has been run + ~/.local/bin on PATH ───────
 step "1/12  Verify ./setup.sh has been run"
 [[ -x "$HERMES_BIN" ]] || die "Hermes venv missing at $HERMES_BIN. Run ./setup.sh first."
 ok "Hermes venv present"
@@ -61,6 +61,44 @@ ok "Hermes venv present"
 ok "$HERMES_HOME/skills exists"
 [[ -f "$HERMES_HOME/.env" ]] || die "$HERMES_HOME/.env missing. Re-run ./setup.sh."
 ok "$HERMES_HOME/.env exists"
+
+# Detect whether ~/.local/bin is on PATH. setup.sh puts `lipy` and
+# `start-chrome-cdp` there — if PATH excludes it, every later stage that calls
+# `lipy ...` directly will silently `command not found`.
+case ":$PATH:" in
+  *":$HOME/.local/bin:"*)
+    ok "\$HOME/.local/bin is on PATH"
+    ;;
+  *)
+    warn "\$HOME/.local/bin is NOT on PATH — \`lipy\` and \`start-chrome-cdp\` won't resolve."
+    # Find the user's shell rc.
+    SHELL_RC=""
+    case "$(basename "${SHELL:-}")" in
+      zsh)  SHELL_RC="$HOME/.zshrc" ;;
+      bash) SHELL_RC="$HOME/.bash_profile" ;;
+      *)    SHELL_RC="$HOME/.profile" ;;
+    esac
+    PATH_LINE='export PATH="$HOME/.local/bin:$PATH"'
+    if [[ $DRY_RUN -eq 0 ]]; then
+      ask "Append \`$PATH_LINE\` to $SHELL_RC and source it for this session?"
+      read -r ans
+      if [[ "$ans" =~ ^[Yy] ]]; then
+        # Idempotent append — don't double-add if the rc already has the line.
+        if [[ -f "$SHELL_RC" ]] && grep -qF '$HOME/.local/bin' "$SHELL_RC"; then
+          ok "$SHELL_RC already references \$HOME/.local/bin (probably commented or in another form)"
+        else
+          printf '\n# brand-growth-engine — added by bootstrap.sh\n%s\n' "$PATH_LINE" >> "$SHELL_RC"
+          ok "appended to $SHELL_RC"
+        fi
+        # Apply to THIS shell so the subsequent stages work without restarting.
+        export PATH="$HOME/.local/bin:$PATH"
+        ok "exported PATH for this session"
+      else
+        warn "Skipping — you'll need to add \`$PATH_LINE\` manually or call lipy by absolute path."
+      fi
+    fi
+    ;;
+esac
 
 # ─── 2. cua-driver + Accessibility (X read path) ──────────────────
 if [[ $SKIP_X -eq 1 ]]; then
@@ -102,9 +140,7 @@ fi
 
 # ─── 3. LLM credentials ───────────────────────────────────────────
 step "3/12  LLM credentials in $HERMES_HOME/.env"
-if grep -qE '^(AZURE_FOUNDRY_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY)=[^<]' "$HERMES_HOME/.env"; then
-  ok "an API key value is present in .env"
-else
+if ! grep -qE '^(AZURE_FOUNDRY_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY)=[^<]' "$HERMES_HOME/.env"; then
   warn "No usable LLM key in $HERMES_HOME/.env (every value still has placeholder)."
   if [[ $DRY_RUN -eq 0 ]]; then
     ask "Open .env in \$EDITOR?"
@@ -112,7 +148,59 @@ else
     [[ "$ans" =~ ^[Yy] ]] && "${EDITOR:-vi}" "$HERMES_HOME/.env"
     grep -qE '^(AZURE_FOUNDRY_API_KEY|ANTHROPIC_API_KEY|OPENROUTER_API_KEY)=[^<]' "$HERMES_HOME/.env" \
       || die "Still no usable LLM key. Fill in one of AZURE_FOUNDRY_API_KEY / ANTHROPIC_API_KEY / OPENROUTER_API_KEY."
-    ok "API key set"
+  fi
+fi
+ok "an API key value is present in .env"
+
+# Live-validate the key. Presence in .env doesn't mean it works — typos,
+# expired keys, and wrong base URLs all pass presence checks. One curl
+# catches all three. Skip the test in --dry-run (no network calls).
+if [[ $DRY_RUN -eq 0 ]]; then
+  # Pull the relevant values out of .env without sourcing (.env may contain
+  # shell-syntax-hostile content like unescaped # or spaces).
+  AZURE_KEY=$(grep -E '^AZURE_FOUNDRY_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
+  AZURE_URL=$(grep -E '^AZURE_FOUNDRY_BASE_URL=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
+  ANTHROPIC_KEY=$(grep -E '^ANTHROPIC_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
+  OPENROUTER_KEY=$(grep -E '^OPENROUTER_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
+
+  KEY_TEST_PASSED=0
+  if [[ -n "$AZURE_KEY" && "$AZURE_KEY" != "<your-azure-key>" && -n "$AZURE_URL" ]]; then
+    # Azure /openai/v1/ list-models endpoint — 200 with valid key, 401 with bad key.
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 8 \
+      -H "api-key: $AZURE_KEY" \
+      "${AZURE_URL%/}/models" 2>/dev/null || echo "000")
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      ok "Azure key validates (HTTP 200 from $AZURE_URL/models)"
+      KEY_TEST_PASSED=1
+    else
+      warn "Azure key returned HTTP $HTTP_STATUS — key, URL, or deployment is wrong."
+    fi
+  fi
+  if [[ $KEY_TEST_PASSED -eq 0 && -n "$ANTHROPIC_KEY" && "$ANTHROPIC_KEY" != "sk-ant-<...>" ]]; then
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 8 \
+      -H "x-api-key: $ANTHROPIC_KEY" \
+      -H "anthropic-version: 2023-06-01" \
+      "https://api.anthropic.com/v1/models" 2>/dev/null || echo "000")
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      ok "Anthropic key validates (HTTP 200 from api.anthropic.com/v1/models)"
+      KEY_TEST_PASSED=1
+    else
+      warn "Anthropic key returned HTTP $HTTP_STATUS."
+    fi
+  fi
+  if [[ $KEY_TEST_PASSED -eq 0 && -n "$OPENROUTER_KEY" && "$OPENROUTER_KEY" != "sk-or-<...>" ]]; then
+    HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" -m 8 \
+      -H "Authorization: Bearer $OPENROUTER_KEY" \
+      "https://openrouter.ai/api/v1/models" 2>/dev/null || echo "000")
+    if [[ "$HTTP_STATUS" == "200" ]]; then
+      ok "OpenRouter key validates (HTTP 200 from openrouter.ai/api/v1/models)"
+      KEY_TEST_PASSED=1
+    else
+      warn "OpenRouter key returned HTTP $HTTP_STATUS."
+    fi
+  fi
+  if [[ $KEY_TEST_PASSED -eq 0 ]]; then
+    die "No LLM key validated via live curl. Fix the value in $HERMES_HOME/.env and re-run."
   fi
 fi
 
@@ -244,9 +332,21 @@ else
     ask "Install + load the launchd plist now? (keeps the gateway alive across reboots)"
     read -r ans
     if [[ "$ans" =~ ^[Yy] ]]; then
-      sed "s|__HOME__|$HOME|g" "$PLIST_SRC" > "$PLIST_DST"
+      mkdir -p "$(dirname "$PLIST_DST")"
+      # Substitute BOTH tokens: __HOME__ (user's home) and __PROJECT_ROOT__ (where
+      # this clone lives). The plist runs under launchd which doesn't expand env
+      # vars in ProgramArguments — so we must bake absolute paths in here.
+      sed -e "s|__HOME__|$HOME|g" \
+          -e "s|__PROJECT_ROOT__|$PROJECT_ROOT|g" \
+          "$PLIST_SRC" > "$PLIST_DST"
+      # Belt-and-suspenders: refuse to load a plist that still has either token.
+      if grep -q '__HOME__\|__PROJECT_ROOT__' "$PLIST_DST"; then
+        die "plist token substitution failed — $PLIST_DST still contains __HOME__ or __PROJECT_ROOT__"
+      fi
       launchctl load "$PLIST_DST"
       ok "installed + loaded $PLIST_DST"
+      ok "  HOME         = $HOME"
+      ok "  PROJECT_ROOT = $PROJECT_ROOT"
     fi
   fi
 fi

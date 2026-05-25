@@ -63,7 +63,10 @@
       "Bash(bash -n /Users/salsmacos/Desktop/projects/brand-growth-engine/scripts/autonomy-mode.sh)",
       "Bash(/Users/salsmacos/Desktop/projects/brand-growth-engine/scripts/autonomy-mode.sh --dry-run)",
       "Bash(bash -n /Users/salsmacos/Desktop/projects/brand-growth-engine/setup.sh)",
-      "Bash(git add *)"
+      "Bash(git add *)",
+      "Bash(git commit -m ' *)",
+      "Bash(bash -n scripts/bootstrap.sh)",
+      "Bash(./scripts/bootstrap.sh --dry-run --skip-x --skip-li)"
     ],
     "additionalDirectories": [
       "/Users/salsmacos/.hermes/memories",
