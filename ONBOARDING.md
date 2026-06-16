@@ -66,6 +66,16 @@ Bypass flags (use sparingly):
 ./scripts/bootstrap.sh --skip-li     # skip LinkedIn login (e.g., an X-only laptop)
 ```
 
+## Start the agent
+
+Bootstrap registers the cron jobs (stage 9) and, if you accepted stage 10, installs the launchd plist that starts the gateway daemon and relaunches it on every reboot. The cron jobs only fire while that daemon is running. To start it by hand (or if you skipped launchd):
+
+```bash
+./vendor/hermes-agent/.venv/bin/hermes gateway start
+```
+
+Confirm it's alive: `pgrep -f "hermes.*gateway"` (or `launchctl list | grep brandgrowthengine` if you used launchd). To halt everything instantly without stopping the daemon, flip `config/caps.yaml` → `x.live` / `linkedin.live` to `false` (re-read every tick).
+
 ## How the loop runs after bootstrap
 
 `autonomy-mode.sh` (stage 9) registers three Hermes cron jobs:

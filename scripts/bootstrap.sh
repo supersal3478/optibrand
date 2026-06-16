@@ -382,6 +382,14 @@ $(c_green '═══════════════════════
 $(c_green '  Bootstrap walkthrough complete.')
 $(c_green '════════════════════════════════════════════════════════════════')
 
+$(c_yellow 'START THE AGENT (this is what makes the cron loop actually run):')
+
+  $(c_blue "$HERMES_BIN gateway start")
+
+  If you installed the launchd plist (stage 10), it already started and will
+  relaunch on every reboot — check with: launchctl list | grep brandgrowthengine
+  Confirm it's alive either way: pgrep -f "hermes.*gateway"
+
 What to check from here:
 
   • Audit log:      tail -f $HERMES_HOME/logs/audit.jsonl
