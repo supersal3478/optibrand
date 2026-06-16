@@ -160,10 +160,13 @@ ok "an API key value is present in .env"
 if [[ $DRY_RUN -eq 0 ]]; then
   # Pull the relevant values out of .env without sourcing (.env may contain
   # shell-syntax-hostile content like unescaped # or spaces).
-  AZURE_KEY=$(grep -E '^AZURE_FOUNDRY_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
-  AZURE_URL=$(grep -E '^AZURE_FOUNDRY_BASE_URL=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
-  ANTHROPIC_KEY=$(grep -E '^ANTHROPIC_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
-  OPENROUTER_KEY=$(grep -E '^OPENROUTER_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
+  # `|| true` because grep exits 1 when a key isn't present in .env (e.g. user
+  # only set Azure, not Anthropic). Under `set -euo pipefail`, that propagates
+  # through the pipe and silently kills the script on bash 3.2 (macOS default).
+  AZURE_KEY=$(grep -E '^AZURE_FOUNDRY_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/' || true)
+  AZURE_URL=$(grep -E '^AZURE_FOUNDRY_BASE_URL=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/' || true)
+  ANTHROPIC_KEY=$(grep -E '^ANTHROPIC_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/' || true)
+  OPENROUTER_KEY=$(grep -E '^OPENROUTER_API_KEY=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/' || true)
 
   KEY_TEST_PASSED=0
   if [[ -n "$AZURE_KEY" && "$AZURE_KEY" != "<your-azure-key>" && -n "$AZURE_URL" ]]; then
@@ -208,7 +211,7 @@ if [[ $DRY_RUN -eq 0 ]]; then
   # When using the Azure provider, make the cheapest deployment the default so
   # every skill/cron tick runs on it unless explicitly escalated. Best-effort.
   if [[ -n "$AZURE_KEY" && "$AZURE_KEY" != "<your-azure-key>" ]]; then
-    AZURE_MODEL=$(grep -E '^AZURE_FOUNDRY_MODEL=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
+    AZURE_MODEL=$(grep -E '^AZURE_FOUNDRY_MODEL=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/' || true)
     AZURE_MODEL="${AZURE_MODEL:-DeepSeek-V4-Flash}"
     if "$HERMES_BIN" config set model "$AZURE_MODEL" >/dev/null 2>&1; then
       ok "default model → $AZURE_MODEL (cheapest; escalate to DeepSeek-V4-Pro where judgment matters)"

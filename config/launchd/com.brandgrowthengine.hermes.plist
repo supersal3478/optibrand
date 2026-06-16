@@ -34,8 +34,7 @@
   <array>
     <string>__PROJECT_ROOT__/vendor/hermes-agent/.venv/bin/hermes</string>
     <string>gateway</string>
-    <string>start</string>
-    <string>--foreground</string>
+    <string>run</string>
   </array>
 
   <key>WorkingDirectory</key>

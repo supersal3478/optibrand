@@ -170,13 +170,13 @@ run "$HERMES_BIN cron remove schedule-tick 2>/dev/null || true"
 run "$HERMES_BIN cron remove daily-report 2>/dev/null || true"
 run "$HERMES_BIN cron remove voice-retrain 2>/dev/null || true"
 
-run "$HERMES_BIN cron add --name schedule-tick --schedule '* * * * *' --prompt '$TICK_PROMPT'"
+run "$HERMES_BIN cron add --name schedule-tick '* * * * *' '$TICK_PROMPT'"
 ok "schedule-tick: every minute (reads schedule.yaml + caps.yaml + windows.yaml)"
 
-run "$HERMES_BIN cron add --name daily-report --schedule '55 23 * * *' --prompt '$REPORT_PROMPT'"
+run "$HERMES_BIN cron add --name daily-report '55 23 * * *' '$REPORT_PROMPT'"
 ok "daily-report: 23:55 every day"
 
-run "$HERMES_BIN cron add --name voice-retrain --schedule '0 2 * * 0' --prompt '$RETRAIN_PROMPT'"
+run "$HERMES_BIN cron add --name voice-retrain '0 2 * * 0' '$RETRAIN_PROMPT'"
 ok "voice-retrain: Sunday 02:00"
 
 # ─── 5. Summary ─────────────────────────────────────────────────

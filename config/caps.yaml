@@ -5,7 +5,7 @@
 # Phase gating. Bump this only when the go-criteria in README.md ("Phased
 # rollout") are met. scripts/autonomy-mode.sh flips this to 2 when you arm
 # inbound replies. Lower = safer; 0 means nothing posts.
-phase: 0  # 0=foundation, 1=youtube, 2=inbound, 3=x_outbound, 4=linkedin_outbound
+phase: 2  # 0=foundation, 1=youtube, 2=inbound, 3=x_outbound, 4=linkedin_outbound
 
 youtube:
   live: false
@@ -18,10 +18,10 @@ youtube:
     daily_quota_units: 9000      # leave 1000 unit buffer below the 10K default
 
 x:
-  live: false
+  live: true
   inbound:
     replies_per_day: 30
-    requires_approval_flag: true # gated on X_AUTO_REPLY_APPROVED env var
+    requires_approval_flag: false  # CDP path, not API # gated on X_AUTO_REPLY_APPROVED env var
   outbound:
     comments_per_day: 15
     relevance_min: 0.75          # relevance-scorer must score ≥ this to consider
@@ -31,7 +31,7 @@ x:
     abort_on_cap: true
 
 linkedin:
-  live: false
+  live: true
   inbound:
     replies_per_day: 25
   outbound:
@@ -47,7 +47,7 @@ linkedin:
 # Outbound 5-minute hold buffer (recommended even under "fully autonomous")
 # Drafts surface in the dashboard for this long before posting; you can yank.
 hold_buffer_outbound_seconds: 300
-hold_buffer_inbound_seconds: 0   # inbound replies post immediately
+hold_buffer_inbound_seconds: 1800   # inbound replies post immediately
 hold_buffer_youtube_seconds: 0
 
 # LLM cost caps (also enforced by the future cost-meter skill)
