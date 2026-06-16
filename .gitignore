@@ -48,9 +48,9 @@ voice_profile.json
 # Approval proof — never commit
 corpus/x_approval.pdf
 
-# Live API key reference — never commit
-51_AZURE_LLM_DEPLOYMENTS_AND_AGENT_RULES.md
-*_LLM_DEPLOYMENTS_*.md
+# NOTE: 51_AZURE_LLM_DEPLOYMENTS_AND_AGENT_RULES.md (live API keys) is intentionally
+# COMMITTED so this private repo is standalone-usable on a fresh laptop. If this repo
+# is ever made public or shared outside the owner, ROTATE the Azure keys immediately.
 
 # Risk acknowledgment — uncomment if you don't want to commit your signature
 # RISK_ACCEPTED.md

@@ -18,7 +18,10 @@ Hermes reads `~/.hermes/.env` (NOT a project-local `.env`). This file is a templ
 #       - reply-drafter on high-visibility OUTBOUND comments (parent likes ≥ 500)
 #   Both were curl-verified against the /openai/v1 shim (HTTP 200, 2026-06-16).
 
-AZURE_FOUNDRY_API_KEY=<from 51_AZURE_*.md, AZURE_API_KEY field>
+# Pre-filled in the committed .env.example (private repo), so setup.sh copies a
+# working key into ~/.hermes/.env automatically — no manual entry on a fresh clone.
+# Full key/deployment reference: 51_AZURE_LLM_DEPLOYMENTS_AND_AGENT_RULES.md (committed).
+AZURE_FOUNDRY_API_KEY=7Q59T4x2PVt3iToAfN8d67onsv47SORtvvG0uF2SmvvxJJ4LCnHcJQQJ99BFACHYHv6XJ3w3AAAAACOGHQMr
 AZURE_FOUNDRY_BASE_URL=https://072025.openai.azure.com/openai/v1
 AZURE_FOUNDRY_MODEL=DeepSeek-V4-Flash
 
