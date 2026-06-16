@@ -156,4 +156,5 @@ The numeric fields (warmth, directness, agrees_then_extends, etc.) are 0.0–1.0
 
 - This skill produces a profile, it does not produce content. `reply-drafter` reads this profile.
 - Privacy: `corpus/` may contain handles of people the user engaged. The LLM call will see this — make sure the model provider's data policy is acceptable to the user. (Anthropic and OpenRouter do not train on API data by default.)
-- Cost: a one-time bootstrap with 200 samples + BRAND.md is ~30K input tokens. With Sonnet 4.6 that's ~$0.10. Retrain weekly is the same.
+- Model: distillation is a one-shot, quality-critical, reasoning-heavy pass that runs only weekly, so it's worth escalating to **`DeepSeek-V4-Pro`** rather than the Flash default. `scripts/voice-train.py` passes `-m DeepSeek-V4-Pro` automatically (override with `--model`).
+- Cost: a one-time bootstrap with 200 samples + BRAND.md is ~30K input tokens — a few cents on DeepSeek pricing even on Pro. Retrain weekly is the same.

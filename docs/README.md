@@ -58,7 +58,7 @@ When those four are wired in (Phase 1+), the only manual step left is the high-l
 
 ✅ **Foundation complete:**
 - Hermes Agent v0.13.0 installed locally at [`vendor/hermes-agent/.venv/`](../vendor/hermes-agent/.venv/)
-- Azure OpenAI (gpt-5.1-chat) wired up via Hermes' `azure-foundry` provider
+- Azure OpenAI (DeepSeek-V4-Flash default, DeepSeek-V4-Pro for high-judgment calls) wired up via Hermes' `azure-foundry` provider
 - 5 project skills written and linked into `~/.hermes/skills/`
 - Long-running browser session daemon (`lipy session`) with CDP attach
 - Human-emulation primitives (Bezier mouse, realistic typing, dwell)

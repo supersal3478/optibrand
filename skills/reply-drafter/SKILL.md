@@ -102,11 +102,14 @@ Whenever the agent needs to author a reply or outbound comment. Always invoked b
 
 ## Model selection
 
-By default use Sonnet (`claude-sonnet-4-6` or current default in `~/.hermes/config.yaml`). Switch to Opus only if BOTH:
+By default use **`DeepSeek-V4-Flash`** — the cheapest deployment and the configured default in `~/.hermes/config.yaml`. Escalate to **`DeepSeek-V4-Pro`** only if BOTH:
 - `parent_engagement.likes` >= 500 (i.e., a high-visibility post where reply quality matters), AND
 - `target_kind` is `outbound_comment`.
 
-This caps cost. Inbound replies and YouTube moderation always use the cheaper model.
+To escalate for a single draft, run it through a per-call override rather than changing config:
+`hermes chat --provider azure-foundry -m DeepSeek-V4-Pro -q "..."`.
+
+This caps cost. Inbound replies and YouTube moderation always stay on Flash. Record which model produced the draft in the `model` field of the return value.
 
 ---
 

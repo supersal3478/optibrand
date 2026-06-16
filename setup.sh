@@ -60,27 +60,30 @@ else
   warn "Chrome not at $CHROME_BIN — install from https://google.com/chrome before running x-engage."
 fi
 
-CUA_DRIVER="$LOCAL_BIN/cua-driver"
-if [[ -x "$CUA_DRIVER" ]]; then
-  CUA_VER="$("$CUA_DRIVER" --version 2>/dev/null | head -1 || echo unknown)"
-  ok "cua-driver found: $CUA_VER"
-else
-  warn "cua-driver not at $CUA_DRIVER — required for x-engage read path (Accessibility API)."
-  warn "  Install: download the Rust binary from https://github.com/trycua/cua releases"
-  warn "          (use the v0.1.x Rust port — Swift port v0.1.9+ requires macOS 14+)."
-  warn "  Then:    chmod +x $CUA_DRIVER && grant Accessibility permission in System Settings."
-fi
+# cua-driver is a SECONDARY tool (OS conveniences only; the X path is all CDP).
+# Auto-install it so a fresh laptop needs zero manual downloads. Never fatal.
+step "Installing cua-driver (X helper; OS conveniences only)"
+bash "$PROJECT_ROOT/scripts/install-cua-driver.sh" || warn "cua-driver install skipped/failed — x-engage core path still works over CDP."
 
 # ─────────────────────────── 2. Hermes Agent ───────────────────────────
 step "Restoring vendor/hermes-agent"
 
+# Pinned to the exact commit this project was built and tested against, so a
+# fresh clone gets the identical Hermes — not whatever upstream HEAD happens to
+# be today. To bump: set HERMES_REF to a newer tag/commit and re-run setup.sh.
+HERMES_REF="${HERMES_REF:-d62808c37383ea44777229ee99a2c4cfe28d2783}"
 HERMES_DIR="$PROJECT_ROOT/vendor/hermes-agent"
 if [[ ! -d "$HERMES_DIR/.git" ]]; then
   mkdir -p "$PROJECT_ROOT/vendor"
-  git clone --depth 1 https://github.com/NousResearch/hermes-agent "$HERMES_DIR"
-  ok "cloned hermes-agent"
+  git clone https://github.com/NousResearch/hermes-agent "$HERMES_DIR"
+  git -C "$HERMES_DIR" checkout --quiet "$HERMES_REF"
+  ok "cloned hermes-agent @ ${HERMES_REF:0:12}"
 else
-  ok "hermes-agent already cloned"
+  # Make sure an existing clone is on the pinned ref (no-op if already there).
+  if git -C "$HERMES_DIR" rev-parse --verify --quiet "$HERMES_REF^{commit}" >/dev/null; then
+    git -C "$HERMES_DIR" checkout --quiet "$HERMES_REF" 2>/dev/null || true
+  fi
+  ok "hermes-agent already cloned (@ $(git -C "$HERMES_DIR" rev-parse --short HEAD))"
 fi
 
 if [[ ! -d "$HERMES_DIR/.venv" ]]; then

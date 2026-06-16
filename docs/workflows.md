@@ -19,7 +19,7 @@ cd ~/Desktop/projects/brand-growth-engine/skills/linkedin-engage
 # 3. Configure Azure OpenAI (Hermes will use it)
 python /tmp/setup_hermes_azure.py     # reads 51_AZURE_*.md, writes ~/.hermes/.env
 .venv/bin/hermes config set provider azure-foundry
-.venv/bin/hermes config set model gpt-5.1-chat
+.venv/bin/hermes config set model DeepSeek-V4-Flash   # cheapest; setup/bootstrap does this for you
 
 # 4. Link our skills into Hermes
 cd ~/Desktop/projects/brand-growth-engine

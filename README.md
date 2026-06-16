@@ -16,32 +16,56 @@ A set of Hermes skills + a brand guide + per-platform configs that, together, in
 
 Phase 0 scaffold. Hermes is installed locally; skills are written; nothing posts yet. All the safety gates (brand-guard, caps, kill-switches) are wired up.
 
+## Install (new laptop, three commands)
+
+Full step-by-step is in [ONBOARDING.md](ONBOARDING.md). The short version, on a freshly unboxed Mac:
+
+```bash
+git clone <your-fork-of-this-repo> brand-growth-engine
+cd brand-growth-engine
+./scripts/preflight.sh    # Stage 0: Homebrew, Python 3.14, Chrome, ripgrep, jq
+./setup.sh                # clones the pinned Hermes, builds venvs, installs cua-driver + lipy, symlinks skills
+./scripts/bootstrap.sh    # interactive: LLM key, BRAND.md, X + LinkedIn logins, voice profile, autonomy arm
+```
+
+Everything is idempotent — re-run any of the three and it picks up where it left off. The only things you bring by hand: an LLM API key and your X/LinkedIn 2FA device.
+
 ## Layout
 
 ```
 brand-growth-engine/
 ├── BRAND.md                 # YOU FILL IN. Voice/values/off-limits/CTAs. Read on every draft.
 ├── README.md                # this file
-├── .gitignore
+├── ONBOARDING.md            # the full new-laptop walkthrough
+├── setup.sh                 # mechanical install (Hermes, venvs, cua-driver, lipy, symlinks)
+├── schedule.example.yaml    # template → copy to schedule.yaml (gitignored)
+├── .env.example             # template → copied to ~/.hermes/.env by setup.sh
 ├── config/
 │   ├── caps.yaml            # daily/weekly caps + per-platform live kill-switches
 │   ├── windows.yaml         # business-hour activity windows
 │   ├── jitter.yaml          # human-like delay jitter
-│   └── blocklist.yaml       # accounts/keywords/domains to never engage
+│   ├── blocklist.yaml       # accounts/keywords/domains to never engage
+│   └── launchd/             # com.brandgrowthengine.hermes.plist (persistent daemon)
 ├── corpus/                  # YOUR EXPORTS. Voice training data (jsonl).
 │   └── README.md            # how to export from each platform
+├── scripts/                 # operational scripts (run via the Hermes venv python)
+│   ├── preflight.sh         # Stage 0: brew, python, Chrome
+│   ├── install-cua-driver.sh# auto-installs the pinned, universal cua-driver
+│   ├── bootstrap.sh         # interactive 12-gate new-laptop walkthrough
+│   ├── autonomy-mode.sh     # flips caps to phase 2 + registers cron jobs
+│   ├── schedule-tick.py     # per-minute orchestrator (publish/monitor/reply)
+│   ├── voice-train.py       # builds ~/.hermes/memories/voice_profile.json
+│   ├── ingest-corpus.py     # normalizes corpus/*.jsonl → _normalized.jsonl
+│   └── daily-report.py      # renders the daily report
 ├── skills/                  # OUR SKILLS, symlinked into ~/.hermes/skills/
 │   ├── voice-profile/       # distill voice from corpus + BRAND.md
 │   ├── brand-guard/         # hard-veto validator on every draft
 │   ├── reply-drafter/       # generate replies in voice
+│   ├── x-engage/            # X reads + writes over Chrome DevTools Protocol (CDP)
 │   ├── youtube-engage/      # YouTube Data API v3 (curl + OAuth)
-│   │   ├── youtube_auth.py  # one-time OAuth bootstrap (you run manually)
-│   │   └── youtube_token.py # runtime access-token helper
-│   └── linkedin-engage/     # Playwright-based; ToS-risky
-│       ├── install.sh       # installs `lipy` CLI
-│       └── lipy.py          # CLI wrapper (browser code is a scaffold — implement before live)
+│   └── linkedin-engage/     # Playwright-based `lipy` CLI; ToS-risky
 └── vendor/
-    └── hermes-agent/        # cloned NousResearch/hermes-agent (~99 MB)
+    └── hermes-agent/        # cloned NousResearch/hermes-agent, pinned (gitignored; ~230 MB)
         └── .venv/           # Hermes' venv with all deps installed
 ```
 
@@ -59,33 +83,18 @@ The agent runs as a daemon (`hermes gateway start`). Cron jobs (set up via `herm
 
 ## Getting started
 
-### 1. Verify the local install
+> `./setup.sh` already did the mechanical work below — cloned the pinned Hermes, built the venv, ran `hermes doctor`, and symlinked every skill into `~/.hermes/skills/`. The steps here are the **reference / manual fallback**, plus the things only you can supply (model key, BRAND.md, corpus, credentials). On a fresh laptop, prefer `./scripts/bootstrap.sh`, which walks all of this interactively with validation.
+
+### Verify the local install (optional)
 
 ```bash
-cd vendor/hermes-agent
-./.venv/bin/hermes doctor
-```
-
-You should see `✓` on Python, packages, directory structure. Some `⚠` items (Telegram, Discord) are optional. If ripgrep shows missing despite being on PATH, that's a benign Hermes-internal PATH detection issue.
-
-### 2. Add the project skills
-
-Symlink each skill folder into `~/.hermes/skills/`:
-
-```bash
-mkdir -p ~/.hermes/skills
-for d in skills/*/; do
-  ln -snf "$(pwd)/$d" "$HOME/.hermes/skills/$(basename "$d")"
-done
-```
-
-Verify Hermes sees them:
-
-```bash
+./vendor/hermes-agent/.venv/bin/hermes doctor
 ./vendor/hermes-agent/.venv/bin/hermes skills list
 ```
 
-### 3. Configure a model
+`doctor` should show `✓` on Python, packages, directory structure. Some `⚠` items (Telegram, Discord) are optional. If ripgrep shows missing despite being on PATH, that's a benign Hermes-internal PATH detection issue. `skills list` should show the six project skills.
+
+### Configure a model
 
 Hermes works with many providers. Three reasonable choices:
 
@@ -107,15 +116,15 @@ Get a key at https://openrouter.ai. Same pattern but `OPENROUTER_API_KEY=...` an
 
 **Option C — Nous Portal** (built-in, lowest friction): `hermes login` and follow the flow.
 
-### 4. Fill in BRAND.md
+### Fill in BRAND.md
 
 This is the most important file in the project. Every drafted reply is validated against it. Open [BRAND.md](BRAND.md) and replace every placeholder.
 
-### 5. Drop voice training data into corpus/
+### Drop voice training data into corpus/
 
 See [corpus/README.md](corpus/README.md) for export instructions per platform. Even partial corpus (say, 30 LinkedIn comments) is enough to bootstrap; more = better voice fidelity.
 
-### 6. Per-platform credentials
+### Per-platform credentials
 
 Add to `~/.hermes/.env`:
 
@@ -139,7 +148,7 @@ LI_RESIDENTIAL_PROXY_URL=http://user:pass@proxy.example.com:8080
 # Bootstrap with: cd skills/linkedin-engage && ./install.sh && lipy login --headed
 ```
 
-### 7. Run
+### Run
 
 The interactive way:
 

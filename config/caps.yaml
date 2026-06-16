@@ -2,8 +2,9 @@
 # Flip live: false to halt that platform within one job tick (≤ scheduler interval).
 # Caps are read fresh at the start of every job — no restart needed to change them.
 
-# Phase gating: launchd installs only the caps for the current phase.
-# scripts/verify-phase.py N validates go-criteria before flipping a higher phase on.
+# Phase gating. Bump this only when the go-criteria in README.md ("Phased
+# rollout") are met. scripts/autonomy-mode.sh flips this to 2 when you arm
+# inbound replies. Lower = safer; 0 means nothing posts.
 phase: 0  # 0=foundation, 1=youtube, 2=inbound, 3=x_outbound, 4=linkedin_outbound
 
 youtube:
@@ -49,10 +50,10 @@ hold_buffer_outbound_seconds: 300
 hold_buffer_inbound_seconds: 0   # inbound replies post immediately
 hold_buffer_youtube_seconds: 0
 
-# Cost caps (also enforced by cost-meter skill)
-anthropic:
+# LLM cost caps (also enforced by the future cost-meter skill)
+llm:
   daily_cap_usd: 5.0
   abort_on_cap: true
-  default_model: claude-sonnet-4-6
-  high_stakes_model: claude-opus-4-7   # used only when relevance ≥ 0.92 and follower count ≥ N
+  default_model: DeepSeek-V4-Flash       # cheapest; the workhorse for everything
+  high_stakes_model: DeepSeek-V4-Pro      # escalate when relevance ≥ 0.92 and follower count ≥ N
   high_stakes_relevance_min: 0.92

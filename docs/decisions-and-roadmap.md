@@ -34,19 +34,20 @@ User preference: "I'd much rather have the code files local here." The cloned re
 - All four deployments verified working via the `/openai/v1/` OpenAI-compatible endpoint, which Hermes' `azure-foundry` plugin uses.
 - Existing Azure tenancy = no new billing setup.
 
-**Why `gpt-5.1-chat` as default:**
-- Cheapest of the four; accepts custom `temperature`; no minimum-token quirk.
-- Fine for most reply drafting and classification work.
-- We can switch to 5.4 for high-stakes drafts (`hermes chat --provider azure-foundry -m gpt-5.4 -q "..."`).
+**Why `DeepSeek-V4-Flash` as default (updated 2026-06-16):**
+- It is the **cheapest deployment** wired to this project — cheaper per token than gpt-5.1-chat — so it's the workhorse for the high-volume paths (inbound replies, brand-guard, moderation, publishing).
+- Verified working through the same `/openai/v1/` shim the `azure-foundry` plugin uses (HTTP 200), so it's a drop-in default with no client changes.
+- Escalate to `DeepSeek-V4-Pro` (same key + endpoint, only the model name changes) where better judgment pays off. The earlier gpt-5.x-based table below is superseded by the DeepSeek Flash/Pro policy; the gpt-5.x deployments stay available on the same key as a fallback.
 
-**Per-skill recommendations:**
+**Per-skill model policy:**
 
-| Skill | Recommended model | Why |
+| Skill / path | Model | Why |
 |---|---|---|
-| `reply-drafter` | `gpt-5.4` | Voice mimicry benefits from controllable temperature; only 5.4 supports non-1 temp |
-| `voice-profile` (training pass) | `gpt-5.3-chat` | Reasoning-style, one-shot quality matters |
-| `brand-guard` | `gpt-5.1-chat` | High-volume, rule-driven; cheap + fast |
-| `spam-classifier` | `gpt-5.1-chat` | High-volume classification |
+| `reply-drafter` (inbound) | `DeepSeek-V4-Flash` | High-volume; cheap default |
+| `reply-drafter` (outbound, parent likes ≥ 500) | `DeepSeek-V4-Pro` | High-visibility — reply quality matters |
+| `voice-profile` (training pass) | `DeepSeek-V4-Pro` | One-shot, quality-critical, runs weekly |
+| `brand-guard` | `DeepSeek-V4-Flash` | High-volume, rule-driven; cheap + fast |
+| `spam-classifier` / YouTube moderation | `DeepSeek-V4-Flash` | High-volume classification |
 
 ### 4. Human emulation built on Playwright (not Selenium / pyppeteer)
 

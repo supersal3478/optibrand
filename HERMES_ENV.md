@@ -4,22 +4,32 @@ Hermes reads `~/.hermes/.env` (NOT a project-local `.env`). This file is a templ
 
 ```bash
 # ───────── Phase 0 (foundation) — currently configured ─────────
-# Using Azure OpenAI via Hermes' azure-foundry provider plugin.
-# Default deployment: gpt-5.1-chat on the 072025 resource.
+# Using Azure OpenAI via Hermes' azure-foundry provider plugin, through the
+# OpenAI-compatible /openai/v1 shim (handles the Azure api-version itself).
 # Credentials live in 51_AZURE_LLM_DEPLOYMENTS_AND_AGENT_RULES.md (gitignored).
-# Setup script: /tmp/setup_hermes_azure.py (re-run if keys rotate).
+#
+# Model policy: Flash-by-default, Pro-when-it-matters.
+#   • DeepSeek-V4-Flash — the cheapest deployment on the 072025 resource. This is
+#     the GLOBAL DEFAULT and the workhorse for everything: inbound replies,
+#     brand-guard, spam/YouTube moderation, scheduled publishing.
+#   • DeepSeek-V4-Pro   — stronger + pricier, SAME key + endpoint (only the model
+#     name changes). Reserve it for calls where better judgment pays off:
+#       - voice-profile distillation (one-shot, quality-critical, weekly)
+#       - reply-drafter on high-visibility OUTBOUND comments (parent likes ≥ 500)
+#   Both were curl-verified against the /openai/v1 shim (HTTP 200, 2026-06-16).
 
 AZURE_FOUNDRY_API_KEY=<from 51_AZURE_*.md, AZURE_API_KEY field>
 AZURE_FOUNDRY_BASE_URL=https://072025.openai.azure.com/openai/v1
+AZURE_FOUNDRY_MODEL=DeepSeek-V4-Flash
 
-# To switch to gpt-5.4 / gpt-5.3-chat (sjudieh resource), comment out the
-# 072025 block and uncomment the sjudieh block (in ~/.hermes/.env):
-#   AZURE_FOUNDRY_API_KEY=<AZURE_API_KEY_GPT_5_4 from doc>
-#   AZURE_FOUNDRY_BASE_URL=https://sjudieh-3891-resource.openai.azure.com/openai/v1
-# Then: hermes config set model gpt-5.4   (or whichever deployment)
-
-# Per-call alternative: hermes chat --provider azure-foundry -m gpt-5.4 -q "..."
-# This overrides the default without changing config or .env.
+# setup/bootstrap runs `hermes config set model DeepSeek-V4-Flash` for you.
+# To change the default by hand:  hermes config set model DeepSeek-V4-Flash
+# Per-call escalation to Pro (no config/.env change needed):
+#   hermes chat --provider azure-foundry -m DeepSeek-V4-Pro -q "..."
+#
+# The gpt-5.x deployments (gpt-5.1-chat, gpt-5.4, etc.) remain available on the
+# same key — see 51_AZURE_*.md — but DeepSeek Flash/Pro is cheaper, so it's the
+# default. To use a gpt-5.x deployment instead, set its name as the model.
 
 # Alternative providers (not currently configured):
 # ANTHROPIC_API_KEY=sk-ant-...

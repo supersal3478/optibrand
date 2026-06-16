@@ -24,6 +24,8 @@ Last updated: 2026-05-14 (after live proof: a reply to @VadimStrizheus posted vi
 
 The official Hermes installer (`hermes computer-use install`) downloads `cua-driver-0.1.9-darwin-x86_64.tar.gz`, which is the **Swift** binary requiring macOS 14+'s Swift runtime. On Monterey it crashes with `Library not loaded: '/usr/lib/swift/libswiftObservation.dylib'`.
 
+**You normally don't do this by hand** — `./setup.sh` (and `scripts/install-cua-driver.sh`) fetch the pinned, universal Rust binary automatically. The manual recipe below is the fallback / explanation.
+
 Use the **Rust port** instead:
 
 ```bash

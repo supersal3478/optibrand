@@ -5,32 +5,34 @@ The short version:
 ```bash
 git clone <your-fork-of-this-repo> brand-growth-engine
 cd brand-growth-engine
-./setup.sh             # mechanical: clones Hermes, installs venvs, symlinks skills
+./scripts/preflight.sh # Stage 0: installs Homebrew, Python, Chrome, ripgrep, jq
+./setup.sh             # mechanical: clones the pinned Hermes, builds venvs, installs cua-driver + lipy, symlinks skills
 ./scripts/bootstrap.sh # interactive: walks every remaining manual gate
 ```
 
-That's it. `bootstrap.sh` is idempotent — re-running picks up at the first un-passed gate.
+That's it. All three are idempotent — re-running picks up where it left off (`bootstrap.sh` at the first un-passed gate).
 
-## Stage 0 — system-level prereqs (do these BEFORE `./setup.sh`)
-
-`setup.sh` will fail fast if any of these are missing. Run them once on a brand-new Mac:
+## Stage 0 — system-level prereqs (one command)
 
 ```bash
-# 1. Xcode Command Line Tools (provides git)
-xcode-select --install
-
-# 2. Homebrew (provides everything else)
-/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"
-
-# 3. Python 3.11+ (3.14 recommended)
-brew install python@3.14
-
-# 4. Google Chrome — download from https://google.com/chrome
-#    (Chrome is required by the X workflow; setup.sh checks for it at
-#    /Applications/Google Chrome.app/Contents/MacOS/Google Chrome.)
+./scripts/preflight.sh
 ```
 
-Optional but useful: `brew install ripgrep jq`.
+That installs everything `setup.sh` depends on: Xcode Command Line Tools (if needed it launches the GUI installer and tells you to re-run), Homebrew, Python 3.14, Google Chrome, plus ripgrep and jq. It's safe and idempotent — each step checks before installing.
+
+<details>
+<summary>If you'd rather run Stage 0 by hand</summary>
+
+```bash
+xcode-select --install                                                               # git + compilers
+/bin/bash -c "$(curl -fsSL https://raw.githubusercontent.com/Homebrew/install/HEAD/install.sh)"  # Homebrew
+brew install python@3.14                                                             # Python 3.11+
+brew install --cask google-chrome                                                    # Chrome (X workflow)
+brew install ripgrep jq                                                              # optional but useful
+```
+</details>
+
+> **cua-driver is now automatic.** `setup.sh` runs `scripts/install-cua-driver.sh`, which downloads the pinned, **universal** (Intel + Apple Silicon) binary — no manual download, no architecture guessing. It's a secondary helper (the X read/write path is all CDP), so if the download ever fails the install keeps going.
 
 You also need to bring **two pieces of information** that can't come from git:
 
@@ -103,12 +105,30 @@ It summarizes:
 - Cost burn (per provider)
 - Rate-limit signals
 
+## Migrating from your old laptop (optional)
+
+The git clone carries your committed content: BRAND.md, the corpus, configs, skills. It does **not** carry your `~/.hermes/` runtime state, which lives outside the repo. `bootstrap.sh` regenerates the parts that matter (X + LinkedIn logins, voice profile), so a clean install is fully supported — you don't have to copy anything.
+
+But if you want continuity rather than a fresh start, copy `~/.hermes/` from the old Mac before wiping it:
+
+```bash
+# On the OLD machine — archive the runtime state:
+tar -czf hermes-state.tgz -C "$HOME" .hermes
+# Move hermes-state.tgz to the new machine, then there:
+tar -xzf hermes-state.tgz -C "$HOME"
+```
+
+What that preserves: your logged-in browser profiles (skip both manual logins), `~/.hermes/.env` (your keys), `memories/voice_profile.json`, `memories/sent_replies.jsonl` (so the weekly voice-retrain keeps its history), the audit log, and `state/scheduled-posts/` (so in-flight posts keep their monitor windows). Re-run `./setup.sh` and `./scripts/bootstrap.sh` afterward — they'll detect the existing state and skip the gates it satisfies.
+
+Two things that can't be copied and must be redone on the new machine: the macOS **Accessibility grant** for cua-driver (a per-machine UI permission) and any **launchd plist** (paths are baked in at install time — bootstrap stage 10 rewrites it).
+
 ## Troubleshooting
 
 | Symptom | Likely cause | Fix |
 |---|---|---|
 | `setup.sh` fails on `pip install -e hermes-agent` | Python 3.11+ not found | `brew install python@3.14`, then re-run |
-| `cua-driver` returns empty arrays for every read | Accessibility permission not granted | System Settings → Privacy & Security → Accessibility → add `cua-driver` + toggle on |
+| `cua-driver check_permissions` shows `accessibility: false` | Accessibility permission not granted | System Settings → Privacy & Security → Accessibility → add `cua-driver` + toggle on |
+| `setup.sh` printed "cua-driver install failed" | Network blip or release moved | Re-run `./scripts/install-cua-driver.sh`; core X path works over CDP regardless |
 | `voice-train.py` reports `BRAND.md still has empty template placeholders` | BRAND.md gate not passed | `$EDITOR BRAND.md` and replace placeholders |
 | `voice-train.py` succeeds but the JSON is missing keys | LLM didn't follow the schema | Re-run; if persistent, switch model in `~/.hermes/.env` |
 | `autonomy-mode.sh` says voice profile missing | Wrote to wrong path (singular `memory/`) | Move to `~/.hermes/memories/voice_profile.json` (plural — Hermes convention) |

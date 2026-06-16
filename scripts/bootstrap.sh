@@ -105,35 +105,37 @@ if [[ $SKIP_X -eq 1 ]]; then
   step "2/12  cua-driver gate (SKIPPED via --skip-x)"
 else
   step "2/12  cua-driver + Accessibility permission"
+  # Auto-install the pinned, universal (Intel + Apple Silicon) binary. cua-driver
+  # is a SECONDARY tool — x-engage reads/writes over CDP — so a failure here is a
+  # warning, never a hard stop.
   if [[ ! -x "$HOME/.local/bin/cua-driver" ]]; then
-    warn "cua-driver not at $HOME/.local/bin/cua-driver"
-    echo "    Required for the X read path (macOS Accessibility API)."
-    echo "    Download the Rust port v0.1.x from https://github.com/trycua/cua/releases"
-    echo "    (Swift port v0.1.9+ requires macOS 14+; Rust port works on Monterey.)"
     if [[ $DRY_RUN -eq 0 ]]; then
-      ask "Open the releases page in your browser?"
-      read -r ans
-      [[ "$ans" =~ ^[Yy] ]] && open "https://github.com/trycua/cua/releases" || true
-      pause "After installing cua-driver to ~/.local/bin/cua-driver and chmod +x'ing it,"
-    fi
-    [[ -x "$HOME/.local/bin/cua-driver" ]] || die "cua-driver still not installed."
-  fi
-  CUA_VER="$("$HOME/.local/bin/cua-driver" --version 2>/dev/null | head -1 || echo unknown)"
-  ok "cua-driver: $CUA_VER"
-
-  # Validate Accessibility grant: try a read on Finder; empty array means no grant.
-  if [[ $DRY_RUN -eq 0 ]]; then
-    AX_TEST="$("$HOME/.local/bin/cua-driver" read --app Finder 2>/dev/null || echo "[]")"
-    if [[ "$AX_TEST" == "[]" ]] || [[ -z "$AX_TEST" ]]; then
-      warn "cua-driver returned empty AX read — Accessibility permission likely not granted."
-      echo "    Grant it via: System Settings → Privacy & Security → Accessibility →"
-      echo "    drag cua-driver in → toggle on."
-      ask "Open the Accessibility panel now?"
-      read -r ans
-      [[ "$ans" =~ ^[Yy] ]] && open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
-      pause "After toggling cua-driver on,"
+      bash "$PROJECT_ROOT/scripts/install-cua-driver.sh" || warn "cua-driver auto-install failed."
     else
-      ok "cua-driver Accessibility grant looks active"
+      echo "  [dry-run] would run scripts/install-cua-driver.sh"
+    fi
+  fi
+  if [[ ! -x "$HOME/.local/bin/cua-driver" ]]; then
+    warn "cua-driver not installed — x-engage core (CDP) still works; OS conveniences (screenshots, hotkeys) won't."
+  else
+    CUA_VER="$("$HOME/.local/bin/cua-driver" --version 2>/dev/null | head -1 || echo unknown)"
+    ok "cua-driver: $CUA_VER"
+
+    # Validate the Accessibility grant the right way: check_permissions returns
+    # JSON like {"accessibility": true, "screen_recording": true}.
+    if [[ $DRY_RUN -eq 0 ]]; then
+      PERMS="$("$HOME/.local/bin/cua-driver" check_permissions 2>/dev/null || echo '{}')"
+      if echo "$PERMS" | grep -q '"accessibility"[[:space:]]*:[[:space:]]*true'; then
+        ok "cua-driver Accessibility grant active"
+      else
+        warn "Accessibility permission not granted (optional, but enables screenshots/hotkeys)."
+        echo "    Grant it via: System Settings → Privacy & Security → Accessibility →"
+        echo "    drag cua-driver in → toggle on."
+        ask "Open the Accessibility panel now? (or just press ENTER to skip)"
+        read -r ans
+        [[ "$ans" =~ ^[Yy] ]] && open "x-apple.systempreferences:com.apple.preference.security?Privacy_Accessibility" || true
+        [[ "$ans" =~ ^[Yy] ]] && pause "After toggling cua-driver on,"
+      fi
     fi
   fi
 fi
@@ -201,6 +203,18 @@ if [[ $DRY_RUN -eq 0 ]]; then
   fi
   if [[ $KEY_TEST_PASSED -eq 0 ]]; then
     die "No LLM key validated via live curl. Fix the value in $HERMES_HOME/.env and re-run."
+  fi
+
+  # When using the Azure provider, make the cheapest deployment the default so
+  # every skill/cron tick runs on it unless explicitly escalated. Best-effort.
+  if [[ -n "$AZURE_KEY" && "$AZURE_KEY" != "<your-azure-key>" ]]; then
+    AZURE_MODEL=$(grep -E '^AZURE_FOUNDRY_MODEL=' "$HERMES_HOME/.env" | sed 's/^[^=]*=//; s/^"\(.*\)"$/\1/')
+    AZURE_MODEL="${AZURE_MODEL:-DeepSeek-V4-Flash}"
+    if "$HERMES_BIN" config set model "$AZURE_MODEL" >/dev/null 2>&1; then
+      ok "default model → $AZURE_MODEL (cheapest; escalate to DeepSeek-V4-Pro where judgment matters)"
+    else
+      warn "couldn't set default model automatically — run: $HERMES_BIN config set model $AZURE_MODEL"
+    fi
   fi
 fi
 

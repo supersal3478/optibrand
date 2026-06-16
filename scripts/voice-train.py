@@ -63,6 +63,11 @@ def main() -> int:
                    help="Retrain mode — weights original corpus 2x over sent_replies.jsonl.")
     p.add_argument("--timeout", type=int, default=600,
                    help="Seconds to wait for the LLM session to finish (default 600).")
+    p.add_argument("--model", default="DeepSeek-V4-Pro",
+                   help="Model deployment for the distillation pass. Defaults to "
+                        "DeepSeek-V4-Pro — this is a one-shot, quality-critical job, "
+                        "so it's worth escalating off the cheap Flash default. Pass an "
+                        "empty string to use the Hermes-configured default instead.")
     args = p.parse_args()
 
     issues = check_inputs(args.retrain)
@@ -96,12 +101,14 @@ def main() -> int:
         f"After writing, print exactly one line: VOICE_PROFILE_WRITTEN={VOICE_OUT}"
     )
 
-    cmd = [
-        str(HERMES_BIN), "chat",
-        "--skills", "voice-profile",
-        "-q", prompt,
-    ]
+    cmd = [str(HERMES_BIN), "chat", "--skills", "voice-profile"]
+    if args.model:
+        # Escalate this one-shot, quality-critical pass off the Flash default.
+        cmd += ["--provider", "azure-foundry", "-m", args.model]
+    cmd += ["-q", prompt]
     print(f"\nrunning: {' '.join(cmd[:4])} ...")
+    if args.model:
+        print(f"  model: {args.model} (override the Hermes default for this pass)")
     print(f"(this may take 60–180 seconds — the LLM is reading {NORMALIZED.stat().st_size:,} bytes of corpus)\n")
 
     pre_mtime = VOICE_OUT.stat().st_mtime if VOICE_OUT.exists() else 0
