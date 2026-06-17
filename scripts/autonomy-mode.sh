@@ -164,11 +164,40 @@ RETRAIN_PROMPT="Run scripts/voice-train.py --retrain from $PROJECT_ROOT. Invoke 
 # Remove old jobs if present, then add fresh. The schedule-tick job replaces
 # both li-inbound (0,30) and x-inbound (15,45) — schedule.yaml now drives
 # everything via per-minute ticks.
-run "$HERMES_BIN cron remove li-inbound 2>/dev/null || true"
-run "$HERMES_BIN cron remove x-inbound 2>/dev/null || true"
-run "$HERMES_BIN cron remove schedule-tick 2>/dev/null || true"
-run "$HERMES_BIN cron remove daily-report 2>/dev/null || true"
-run "$HERMES_BIN cron remove voice-retrain 2>/dev/null || true"
+#
+# IMPORTANT: hermes cron remove takes IDs, not names. The old shell-loop
+# remove-by-name silently failed, creating duplicates on every re-arm
+# (caught 2026-06-17 — found 3× schedule-tick / daily-report / voice-retrain
+# after two arming runs). Use a Python helper to look up IDs by name and
+# remove them. Idempotent regardless of how many duplicates accumulated.
+remove_by_name() {
+  $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python - "$1" "$HERMES_BIN" <<'PYHELPER'
+import subprocess, sys
+target, hermes = sys.argv[1], sys.argv[2]
+r = subprocess.run([hermes, 'cron', 'list'], capture_output=True, text=True)
+current_id = None
+ids_to_remove = []
+for line in r.stdout.splitlines():
+    s = line.strip()
+    if s.endswith("[active]") or s.endswith("[paused]"):
+        current_id = s.split()[0]
+    elif current_id and "Name:" in s:
+        name = s.split("Name:", 1)[1].strip()
+        if name == target:
+            ids_to_remove.append(current_id)
+        current_id = None
+for jid in ids_to_remove:
+    subprocess.run([hermes, 'cron', 'remove', jid], capture_output=True)
+if ids_to_remove:
+    print(f"removed {len(ids_to_remove)} job(s) named '{target}'")
+PYHELPER
+}
+
+run "remove_by_name li-inbound"
+run "remove_by_name x-inbound"
+run "remove_by_name schedule-tick"
+run "remove_by_name daily-report"
+run "remove_by_name voice-retrain"
 
 run "$HERMES_BIN cron add --name schedule-tick '* * * * *' '$TICK_PROMPT'"
 ok "schedule-tick: every minute (reads schedule.yaml + caps.yaml + windows.yaml)"
@@ -181,17 +210,17 @@ ok "voice-retrain: Sunday 02:00"
 
 # ─── 4b. Phase-2 X engagement orchestrators ───────────────────────────
 #
-# All times below are TORONTO LOCAL (America/Toronto), because macOS cron
-# doesn't honor TZ in crontab and the user's SGT posting schedule converts to
-# fixed Toronto times. Update these if DST shifts the SGT→Toronto offset.
+# All times below are SGT (Asia/Singapore). The macmini's system TZ is SGT
+# despite BGE_TIMEZONE=America/Toronto in ~/.hermes/.env (verified via
+# `date` 2026-06-17). Hermes cron uses system local TZ.
 #
 # Goodwill fires 30 min before each SGT post (6/day every day):
-#   SGT 02:00 → Toronto T-30 = 13:30 (prev day)
-#   SGT 07:00 → Toronto T-30 = 18:30 (prev day)
-#   SGT 09:00 → Toronto T-30 = 20:30 (prev day)
-#   SGT 16:00 → Toronto T-30 = 03:30
-#   SGT 18:00 → Toronto T-30 = 05:30
-#   SGT 22:00 → Toronto T-30 = 09:30
+#   SGT 02:00 → T-30 = 01:30
+#   SGT 07:00 → T-30 = 06:30
+#   SGT 09:00 → T-30 = 08:30
+#   SGT 16:00 → T-30 = 15:30
+#   SGT 18:00 → T-30 = 17:30
+#   SGT 22:00 → T-30 = 21:30
 GOODWILL_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/feed-engagement.py --mode goodwill --max-visits 3 --max-reads 20 --live"
 
 INBOUND_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/inbound-engagement.py --platforms x --limit 5 --live"
@@ -200,19 +229,23 @@ COMMENTER_PROMPT="Subprocess this exact command and return its stdout: cd $PROJE
 
 FLUSH_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/outbox-flush.py --batch 1"
 
-# Clean removal of any prior X-engagement cron entries.
-for J in goodwill-0330 goodwill-0530 goodwill-0930 goodwill-1330 goodwill-1830 goodwill-2030 inbound-monitor engage-commenter outbox-flush; do
-  run "$HERMES_BIN cron remove $J 2>/dev/null || true"
+# Clean removal of any prior X-engagement cron entries (both Toronto-style
+# names from the pre-fix run and the current SGT names).
+for J in \
+    goodwill-0130 goodwill-0630 goodwill-0830 goodwill-1530 goodwill-1730 goodwill-2130 \
+    goodwill-0330 goodwill-0530 goodwill-0930 goodwill-1330 goodwill-1830 goodwill-2030 \
+    inbound-monitor engage-commenter outbox-flush; do
+  run "remove_by_name $J"
 done
 
-# Goodwill — 6 triggers, Toronto-local.
-run "$HERMES_BIN cron add --name goodwill-0330 '30 3 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-0530 '30 5 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-0930 '30 9 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-1330 '30 13 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-1830 '30 18 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-2030 '30 20 * * *' '$GOODWILL_PROMPT'"
-ok "goodwill: 6 triggers (Toronto 03:30/05:30/09:30/13:30/18:30/20:30 = T-30 before SGT posts)"
+# Goodwill — 6 triggers, SGT (system local TZ).
+run "$HERMES_BIN cron add --name goodwill-0130 '30 1 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-0630 '30 6 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-0830 '30 8 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-1530 '30 15 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-1730 '30 17 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-2130 '30 21 * * *' '$GOODWILL_PROMPT'"
+ok "goodwill: 6 triggers (SGT 01:30/06:30/08:30/15:30/17:30/21:30 = T-30 before SGT posts)"
 
 # Inbound monitor — replies to comments on YOUR posts. Every 10 min.
 run "$HERMES_BIN cron add --name inbound-monitor '*/10 * * * *' '$INBOUND_PROMPT'"
@@ -241,7 +274,7 @@ Configuration applied:
       schedule-tick  — every minute  (legacy orchestrator)
       daily-report   — 23:55 daily
       voice-retrain  — Sunday 02:00
-      goodwill x6    — Toronto 03:30 / 05:30 / 09:30 / 13:30 / 18:30 / 20:30 (T-30 before each SGT post)
+      goodwill x6    — SGT 01:30 / 06:30 / 08:30 / 15:30 / 17:30 / 21:30 (T-30 before each SGT post)
       inbound-mon    — every 10 min  (replies to YOUR comments)
       eng-commenter  — every 15 min  (goodwill follow-up on commenters)
       outbox-flush   — every 2 min   (humanly submits + likes from outbox)
