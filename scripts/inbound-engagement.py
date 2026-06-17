@@ -1,21 +1,25 @@
 #!/usr/bin/env python3
-"""engagement-test.py — dry-run engagement loop. No posts; just drafts.
+"""inbound-engagement.py — reply to third-party comments on YOUR posts.
 
-For each new inbound item on X / LinkedIn:
-  1. Draft a reply via reply-drafter + brand-guard (your voice + BRAND.md)
-  2. X: open a NEW tab in your CDP Chrome with the composer pre-filled
-  3. LinkedIn: print the comment + drafted reply to stdout for copy-paste
-  4. Stop short of clicking submit — that's yours
+For each new inbound comment on X / LinkedIn:
+  1. Draft a reply via voice + BRAND.md (no first names, length-distributed:
+     50% ≤7w, 25% ≤15w, 25% ≤25w, no trailing period).
+  2. Inline brand-guard (em-dash strip, hashtag/sycophantic refuse).
+  3. --live   : enqueue to ~/.hermes/state/outbox.jsonl with mode="inbound"
+                (30-min hold buffer via caps.yaml; outbox-flush.py submits +
+                likes); ALSO queue the commenter for follow-up engagement in
+                ~/.hermes/state/commenter_queue.jsonl.
+     dry-run  : X — open composer-prefilled tab; LinkedIn — stdout copy-paste.
 
 Idempotent. Re-running skips items already drafted (state at
 ~/.hermes/state/engagement_seen.json). Pass --reset-seen to clear.
 
 Usage:
-    scripts/engagement-test.py                  # both platforms, top 5 per
-    scripts/engagement-test.py --platforms x    # X only
-    scripts/engagement-test.py --platforms linkedin
-    scripts/engagement-test.py --limit 3
-    scripts/engagement-test.py --reset-seen
+    scripts/inbound-engagement.py                       # both platforms
+    scripts/inbound-engagement.py --platforms x         # X only
+    scripts/inbound-engagement.py --live                # autonomous; outbox
+    scripts/inbound-engagement.py --limit 3
+    scripts/inbound-engagement.py --reset-seen
 """
 from __future__ import annotations
 
@@ -40,7 +44,17 @@ LIPY_BIN = Path(os.environ.get("LIPY_BIN", Path.home() / ".local" / "bin" / "lip
 START_CHROME_CDP = PROJECT_ROOT / "skills" / "x-engage" / "start-chrome-cdp.sh"
 SEEN_PATH = HERMES_HOME / "state" / "engagement_seen.json"
 BLOCKLIST_PATH = HERMES_HOME / "state" / "engagement_blocklist.json"
+COMMENTER_QUEUE_PATH = HERMES_HOME / "state" / "commenter_queue.jsonl"
 CDP_PORT = 9222
+
+# Phase-2 shared libs.
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+import _outbox  # noqa: E402
+import _metrics  # noqa: E402
+from _drafter import (  # noqa: E402
+    pick_length_target,
+    apply_length_and_punctuation_fixes,
+)
 
 X_MENTIONS_URL = "https://x.com/notifications/mentions"
 X_COMPOSER_SELECTOR = 'div[data-testid="tweetTextarea_0"]'
@@ -246,28 +260,38 @@ def _inline_brand_guard(draft: str) -> tuple[str, list[str], list[str]]:
 
 
 def draft_reply(platform: str, author: str, text: str) -> dict:
-    """Returns {decision: DRAFT|REFUSE, draft|reasons: ...}.
-    One direct Azure /chat/completions call. ~5–15s."""
+    """Returns {decision: DRAFT|REFUSE, draft|reasons: ..., length_target: ...}.
+    One direct Azure /chat/completions call. ~5–15s.
+
+    Applies the same stylistic rules as feed-engagement.py goodwill drafter:
+      • No first name / display name / handle of the commenter
+      • Random length target (50% 7w, 25% 15w, 25% 25w)
+      • No trailing period
+      • Inline brand-guard (em-dash strip, hashtag/sycophantic refuse)
+    """
     import httpx
     cfg = _load_azure_config()
     if not cfg["api_key"] or not cfg["base_url"]:
         return {"decision": "REFUSE", "reasons": [{"rule": "no-azure-config"}]}
 
     voice_ctx = _brand_voice_context()
-    max_chars = 280 if platform == "x" else 600
+    length_label, length_instruction, max_words = pick_length_target()
     system = (
-        "You are Sal AI (@salaicreates). You're drafting a reply to a comment on one of your social posts. "
-        "Match the voice/tone/vocabulary distilled below from BRAND.md and your voice profile. "
-        "Write ONE reply — concrete, warm, direct, no abstractions. No em-dash (—). No hashtags. "
-        "Never open with 'Great question', 'Absolutely', 'Thanks for sharing', 'I love this', or any sycophantic opener. "
-        f"Length: under {max_chars} characters. "
+        "You are Sal AI (@salaicreates). You're drafting a reply to a comment that "
+        "someone left on one of your X / LinkedIn posts. "
+        "Match the voice/tone/vocabulary distilled below from BRAND.md and your voice profile.\n\n"
+        "DO NOT use the commenter's name, first name, display name, or handle anywhere in the reply. "
+        "Engage directly with what they said.\n\n"
+        f"{length_instruction}\n\n"
+        "No em-dash (—). No hashtags. No sycophantic openers ('Great question', "
+        "'Absolutely', 'Thanks for sharing', 'I love this', 'Great point', etc.). "
         "Output ONLY the reply text — no JSON, no quotes, no preamble."
     )
     user = (
         f"=== voice + brand context ===\n{voice_ctx}\n\n"
         f"=== reply target ===\n"
         f"platform: {platform}\n"
-        f"comment author: {author}\n"
+        f"commenter handle (DO NOT mention): {author}\n"
         f"comment text: {text}\n\n"
         "Write the reply now."
     )
@@ -302,9 +326,12 @@ def draft_reply(platform: str, author: str, text: str) -> dict:
     if refused:
         return {"decision": "REFUSE", "draft": cleaned, "raw_draft": draft,
                 "reasons": [{"rule": r} for r in refused],
-                "autofixes": autofixes}
-    return {"decision": "DRAFT", "draft": cleaned, "raw_draft": draft,
-            "autofixes": autofixes}
+                "autofixes": autofixes,
+                "length_target": length_label}
+    result = {"decision": "DRAFT", "draft": cleaned, "raw_draft": draft,
+              "autofixes": autofixes, "length_target": length_label}
+    apply_length_and_punctuation_fixes(result, max_words)
+    return result
 
 
 # ─── X side ───────────────────────────────────────────────────────────
@@ -444,11 +471,23 @@ async def fetch_x_my_recent_posts(handle: str, max_age_days: int = 14,
     blocklist = blocklist or {"x": [], "linkedin": []}
     items = await _navigate_and_extract(f"https://x.com/{handle}", scroll_passes=scroll_passes)
     cutoff = datetime.now(tz=ZoneInfo("UTC")) - __import__("datetime").timedelta(days=max_age_days)
+    handle_segment = f"/{handle.lower()}/status/"
     out = []
     skipped_pinned = 0
     skipped_old = 0
     skipped_blocklist = 0
+    skipped_repost = 0
     for it in items[:X_RECENT_POSTS_LIMIT]:
+        # CRITICAL: filter to posts AUTHORED by `handle`. The profile timeline
+        # also shows reposts / quote-tweets where the article's status link
+        # points to the ORIGINAL author's tweet, not the user's. Replying to
+        # comments on those would post AS IF the user authored the original —
+        # a real failure mode (caught 2026-06-17 when an Elon repost surfaced
+        # 16 comments that would have been replied to as if user were Elon).
+        post_url_lower = (it.get("url") or "").lower()
+        if handle_segment not in post_url_lower:
+            skipped_repost += 1
+            continue
         replies = parse_reply_count(it.get("reply_aria", ""))
         if replies <= 0:
             continue
@@ -476,6 +515,8 @@ async def fetch_x_my_recent_posts(handle: str, max_age_days: int = 14,
             "ts": ts_str,
             "age_days": age_days,
         })
+    if skipped_repost:
+        print(f"[x]   skipped {skipped_repost} repost/quote-tweet(s) not authored by @{handle}")
     if skipped_pinned:
         print(f"[x]   skipped {skipped_pinned} pinned post(s)")
     if skipped_blocklist:
@@ -645,12 +686,13 @@ def _collect_x_items(source: str, max_age_days: int = 14) -> list[dict]:
     return items
 
 
-def run_x(limit: int, source: str, max_age_days: int, seen: dict) -> int:
+def run_x(limit: int, source: str, max_age_days: int, seen: dict,
+          live: bool = False) -> int:
     if not ensure_cdp_chrome():
         print("[x] CDP Chrome unreachable on :9222 — start it manually or check ~/.local/bin/start-chrome-cdp",
               file=sys.stderr)
         return 0
-    print("\n=== X (Twitter) inbound ===")
+    print(f"\n=== X (Twitter) inbound  [live={live}] ===")
     items = _collect_x_items(source, max_age_days=max_age_days)
     if not items:
         print("[x] nothing to engage with right now")
@@ -680,20 +722,89 @@ def run_x(limit: int, source: str, max_age_days: int, seen: dict) -> int:
             if raw:
                 print(f"        Refused draft: {raw}")
             print(f"        SKIP — {reasons}")
+            _metrics.log_event("vetoed_brandguard", platform="x", mode="inbound",
+                               parent_url=url, reasons=reasons)
             seen_x[url] = {"ts": utcnow(), "status": "refused"}
             continue
         reply_text = result["draft"].strip()
         if result.get("autofixes"):
             print(f"        Autofixes: {result['autofixes']}")
         print(f"        Draft:     {reply_text}")
-        fill_result = asyncio.run(fill_composer_in_new_tab(url, reply_text))
-        if not fill_result.get("ok"):
-            print(f"        FAIL — {fill_result.get('error')}")
-            continue
-        print(f"        ✓ new tab open with composer pre-filled — review and submit in Chrome")
-        seen_x[url] = {"ts": utcnow(), "status": "drafted"}
+        _metrics.log_event("drafted", platform="x", mode="inbound",
+                           parent_url=url, chars=len(reply_text),
+                           word_count=len(reply_text.split()),
+                           length_target=result.get("length_target"),
+                           autofixes=result.get("autofixes"))
+
+        if live:
+            # Live: enqueue to outbox, queue the commenter for follow-up.
+            try:
+                outbox_id = _outbox.enqueue(
+                    platform="x", mode="inbound",
+                    parent_url=url, draft_text=reply_text,
+                    metadata={
+                        "author": author,
+                        "comment_text": text[:500],
+                        "parent_post": parent,
+                        "length_target": result.get("length_target"),
+                        "autofixes": result.get("autofixes") or [],
+                    },
+                )
+                print(f"        ✓ queued outbox id={outbox_id}")
+                _queue_commenter_for_followup(author, parent_post=parent,
+                                               source_reply_url=url)
+                seen_x[url] = {"ts": utcnow(), "status": "queued",
+                               "outbox_id": outbox_id}
+            except Exception as e:
+                print(f"        FAIL queueing — {e}")
+                seen_x[url] = {"ts": utcnow(), "status": "queue_failed",
+                               "reason": str(e)[:200]}
+                continue
+        else:
+            # Dry-run: composer pre-fill (legacy behavior).
+            fill_result = asyncio.run(fill_composer_in_new_tab(url, reply_text))
+            if not fill_result.get("ok"):
+                print(f"        FAIL — {fill_result.get('error')}")
+                continue
+            print(f"        ✓ new tab open with composer pre-filled — review and submit in Chrome")
+            seen_x[url] = {"ts": utcnow(), "status": "drafted_dry"}
         drafted += 1
     return drafted
+
+
+def _queue_commenter_for_followup(commenter_field: str, *,
+                                    parent_post: str = "",
+                                    source_reply_url: str = "") -> None:
+    """Append commenter to ~/.hermes/state/commenter_queue.jsonl.
+
+    `commenter_field` is the raw author string from the X DOM (e.g.,
+    'Vadim Strizheus | @VadimStrizheus | · | Oct 8'). We extract the @handle.
+    engage-commenter.py pops from this queue, navigates to the profile,
+    scores their recent posts, drafts goodwill on top 1-2.
+    """
+    import re as _re
+    m = _re.search(r"@([A-Za-z0-9_]+)", commenter_field or "")
+    if not m:
+        return
+    handle = m.group(1)
+    record = {
+        "ts": utcnow(),
+        "platform": "x",
+        "handle": handle,
+        "raw_author": commenter_field,
+        "parent_post": parent_post,
+        "source_reply_url": source_reply_url,
+        "status": "queued",
+    }
+    COMMENTER_QUEUE_PATH.parent.mkdir(parents=True, exist_ok=True)
+    with COMMENTER_QUEUE_PATH.open("a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    try:
+        _metrics.log_event("commenter_queued", platform="x", mode="inbound",
+                           handle=handle, parent_url=parent_post,
+                           source_reply_url=source_reply_url)
+    except Exception:
+        pass
 
 
 def run_li(limit: int, seen: dict) -> int:
@@ -755,6 +866,11 @@ def main() -> int:
                         "'mentions' scans /notifications/mentions. 'auto' tries my-posts first.")
     p.add_argument("--max-age-days", type=int, default=14,
                    help="Skip your posts older than this many days (default 14). Excludes pinned posts.")
+    p.add_argument("--live", action="store_true",
+                   help="Enqueue drafts to ~/.hermes/state/outbox.jsonl (mode=inbound, "
+                        "30-min hold buffer). outbox-flush.py humanly submits + likes. "
+                        "Also queues each commenter for follow-up engagement. "
+                        "Default: dry-run with composer-pre-fill tabs.")
     p.add_argument("--reset-seen", action="store_true",
                    help="Wipe the engagement_seen state file before running.")
     p.add_argument("--watch", action="store_true",
@@ -775,7 +891,8 @@ def main() -> int:
         seen = load_seen()
         drafted = 0
         if "x" in platforms:
-            drafted += run_x(args.limit, args.source, args.max_age_days, seen)
+            drafted += run_x(args.limit, args.source, args.max_age_days, seen,
+                             live=args.live)
         if "linkedin" in platforms:
             drafted += run_li(args.limit, seen)
         save_seen(seen)

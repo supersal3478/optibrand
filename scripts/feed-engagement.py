@@ -56,6 +56,22 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 HERMES_BIN = PROJECT_ROOT / "vendor" / "hermes-agent" / ".venv" / "bin" / "hermes"
 START_CHROME_CDP = PROJECT_ROOT / "skills" / "x-engage" / "start-chrome-cdp.sh"
 
+# Phase-2 shared libs (humanization, outbox, metrics). Imported lazily where
+# possible so dry-run / smoke paths don't blow up if a transient import error
+# happens during a cron run — we degrade gracefully and log.
+sys.path.insert(0, str(PROJECT_ROOT / "scripts"))
+sys.path.insert(0, str(PROJECT_ROOT / "skills" / "x-engage"))
+from _cdp import open_session as _open_human_session  # noqa: E402
+from x_human import HumanCDP  # noqa: E402
+import _outbox  # noqa: E402
+import _metrics  # noqa: E402
+from _drafter import (  # noqa: E402
+    pick_length_target as _pick_length_target,
+    apply_length_and_punctuation_fixes as _apply_length_and_punctuation_fixes,
+    strip_trailing_period as _strip_trailing_period,
+    enforce_word_cap as _enforce_word_cap,
+)
+
 SEEN_PATH = HERMES_HOME / "state" / "feed_engagement_seen.json"  # separate from engagement-test.py's seen file
 BLOCKLIST_PATH = HERMES_HOME / "state" / "engagement_blocklist.json"  # shared with engagement-test.py
 
@@ -110,13 +126,34 @@ X_EXTRACT_FEED_JS = """
     const time = a.querySelector('time');
     const ctx = a.querySelector('[data-testid="socialContext"]');
     const ctxText = ctx ? ctx.innerText : '';
+    // Ad detection — X marks promoted posts via several markers. We tried
+    // including [data-testid="placementTracking"] but verified empirically
+    // that X puts it on EVERY feed article (it's tracking, not an ad flag).
+    // Reliable ad-only markers:
+    //   1. socialContext contains "Promoted" word
+    //   2. reportPromotedTweet button (overflow menu — only ads have this)
+    //   3. ad-redirect link (/i/redirect or /i/ads)
+    //   4. "Promoted" word-boundary text anywhere in the article
+    const hasPromotedReport = !!a.querySelector('[data-testid="reportPromotedTweet"]');
+    const hasAdRedirect     = !!a.querySelector('a[href*="/i/redirect"], a[href*="/i/ads"]');
+    const promotedByContext = /\\bPromoted\\b/i.test(ctxText);
+    const fullText          = a.innerText || '';
+    const promotedByBadge   = /\\bPromoted\\b/.test(fullText);
+    const promoted = hasPromotedReport || hasAdRedirect
+                  || promotedByContext || promotedByBadge;
     return {
       author: u ? u.innerText.replace(/\\n/g, ' | ') : '',
       text: t ? t.innerText : '',
       url: link ? link.href : '',
       ts: time ? time.getAttribute('datetime') : '',
       pinned: /pinned/i.test(ctxText),
-      promoted: /promoted|ad/i.test(ctxText),
+      promoted: promoted,
+      promoted_reasons: [
+        hasPromotedReport ? 'promoted_report' : null,
+        hasAdRedirect     ? 'ad_redirect'     : null,
+        promotedByContext ? 'social_ctx'      : null,
+        promotedByBadge   ? 'badge_text'      : null,
+      ].filter(Boolean),
       social_context: ctxText,
     };
   }).filter(r => r.url);
@@ -408,28 +445,33 @@ def draft_goodwill_comment(handle: str, op_first_name: str, op_handle: str,
     if not cfg["api_key"] or not cfg["base_url"]:
         return {"decision": "REFUSE", "reasons": [{"rule": "no-azure-config"}]}
     voice_ctx = _brand_voice_context()
+    length_label, length_instruction, max_words = _pick_length_target()
     system = (
         f"You are Sal AI (@{handle}). You're leaving a goodwill comment on someone ELSE's X post "
         "(an outbound engagement to build relationship with another operator in your space). "
-        "Match the voice/tone/vocabulary distilled below from BRAND.md and the voice profile. "
-        "Open with the OP's first name only when natural. ADD a concrete experience, counter-point, "
-        "or share a relevant anecdote — do NOT just agree. "
+        "Match the voice/tone/vocabulary distilled below from BRAND.md and the voice profile.\n\n"
+        "DO NOT use the OP's name, first name, display name, or handle anywhere in the comment. "
+        "Engage directly with the point they made — no 'Mario,' opener, no '@user', nothing. "
+        "ADD a concrete experience, counter-point, or share a relevant anecdote — do NOT just agree.\n\n"
+        f"{length_instruction}\n\n"
         "No em-dash (—). No hashtags. "
         "Never open with 'Great question', 'Absolutely', 'Thanks for sharing', 'I love this', "
         "'This is amazing', 'Great point', or any sycophantic opener. "
-        "Length: under 280 characters. "
         "Output ONLY the comment text — no JSON, no quotes, no preamble."
     )
     user = (
         f"=== voice + brand context ===\n{voice_ctx}\n\n"
         f"=== outbound goodwill target ===\n"
         f"platform: x\n"
-        f"OP first name: {op_first_name}\n"
-        f"OP handle: {op_handle}\n"
+        f"OP handle (DO NOT mention): {op_handle}\n"
         f"OP post text: {post_text}\n\n"
         "Write the goodwill comment now."
     )
-    return _post_to_azure(cfg, system, user)
+    out = _post_to_azure(cfg, system, user)
+    if isinstance(out, dict):
+        out["length_target"] = length_label
+        _apply_length_and_punctuation_fixes(out, max_words)
+    return out
 
 
 def draft_self_thread_continuation(handle: str, original_post_text: str) -> dict:
@@ -438,15 +480,16 @@ def draft_self_thread_continuation(handle: str, original_post_text: str) -> dict
     if not cfg["api_key"] or not cfg["base_url"]:
         return {"decision": "REFUSE", "reasons": [{"rule": "no-azure-config"}]}
     voice_ctx = _brand_voice_context()
+    length_label, length_instruction, max_words = _pick_length_target()
     system = (
         f"You are Sal AI (@{handle}). You just posted the following on X. Now draft a follow-up "
         "comment on your own post — a thread continuation that extends YOUR OWN argument with one "
         "more concrete point, an example, or a related observation. This is your own voice continuing "
         "your own thread (the way you naturally extend threads manually). "
         "Match the voice in BRAND.md + voice profile (which IS your voice). "
-        "Do NOT repeat or paraphrase your original. Add something new. "
+        "Do NOT repeat or paraphrase your original. Add something new.\n\n"
+        f"{length_instruction}\n\n"
         "No em-dash (—). No hashtags. No sycophantic openers ('great', 'absolutely', etc.). "
-        "Length: under 280 characters. "
         "Output ONLY the follow-up comment — no JSON, no quotes, no preamble."
     )
     user = (
@@ -454,7 +497,11 @@ def draft_self_thread_continuation(handle: str, original_post_text: str) -> dict
         f"=== your original post (extend this) ===\n{original_post_text}\n\n"
         "Write the thread continuation now."
     )
-    return _post_to_azure(cfg, system, user)
+    out = _post_to_azure(cfg, system, user)
+    if isinstance(out, dict):
+        out["length_target"] = length_label
+        _apply_length_and_punctuation_fixes(out, max_words)
+    return out
 
 
 def _post_to_azure(cfg: dict, system: str, user: str) -> dict:
@@ -490,6 +537,196 @@ def _post_to_azure(cfg: dict, system: str, user: str) -> dict:
     return {"decision": "DRAFT", "draft": cleaned, "raw_draft": draft, "autofixes": autofixes}
 
 
+# ─── Audience-alignment judge (LLM, replaces keyword scoring for goodwill) ─
+
+def _brand_audience_context() -> str:
+    """Pull just the Positioning + Audiences section from BRAND.md. The audience
+    judge gets this — not the whole file — so the prompt stays small and the
+    judgment focuses on audience fit, not voice or veto rules."""
+    brand = PROJECT_ROOT / "BRAND.md"
+    if not brand.exists():
+        return ""
+    text = brand.read_text()
+    # Take from the Positioning header through to the Voice section heading.
+    m = re.search(r"(\*\*Positioning.*?)(?=\n##\s+Voice)", text, re.DOTALL)
+    if m:
+        return m.group(1).strip()
+    # Fallback: first 1800 chars of BRAND.md
+    return text[:1800]
+
+
+def judge_audience_alignment(handle: str, op_handle: str, op_display: str,
+                             post_text: str) -> dict:
+    """Cheap-Flash call. Decide whether commenting under this post would put
+    the brand in front of an aligned audience.
+
+    Returns {"decision": "yes"|"no", "confidence": float, "reason": str}.
+    On any error: returns decision="no" with reason="judge_error:..." so a
+    transient LLM failure does NOT default us into commenting on unknown posts.
+    """
+    cfg = _load_azure_config()
+    if not cfg["api_key"] or not cfg["base_url"]:
+        return {"decision": "no", "confidence": 0.0,
+                "reason": "judge_error:no-azure-config"}
+    audience_ctx = _brand_audience_context()
+    if not audience_ctx:
+        return {"decision": "no", "confidence": 0.0,
+                "reason": "judge_error:no-brand-audience"}
+    system = (
+        "You are evaluating whether commenting on a stranger's X post would put a "
+        "specific brand in front of audience members aligned with that brand.\n\n"
+        "BE PERMISSIVE ON TECH/AI TOPICS. If the post touches AI, agents, "
+        "automation, agentic workflows, LLMs, Claude, MCP, browser automation, "
+        "computer use, dev tooling, infrastructure, dev productivity, "
+        "shipping software, building products, or any adjacent technical topic — "
+        "decide YES even if the post is generic, hype-y, or written by a 'thought "
+        "leader'. Why: the brand's primary audience (operators / agency owners "
+        "building AI automation) reads and engages with those threads — to push "
+        "back, share what they shipped, compare notes, or argue specifics. The "
+        "commenters under such posts ARE the brand's audience, regardless of the "
+        "OP's own register.\n\n"
+        "Decide NO only when the post is clearly off-target:\n"
+        "  - Crypto pump / memecoin / trading signals / 'next 100x'\n"
+        "  - Self-help / morning routines / motivational / 5am-club / mindset\n"
+        "  - Politics / partisan commentary / culture-war takes\n"
+        "  - Drama / call-outs / personal feuds / dunk threads\n"
+        "  - Job-seeking / resume requests / 'open to work'\n"
+        "  - Unrelated lifestyle / fashion / sports / entertainment\n"
+        "  - Empty content (no text and no inferable context)\n\n"
+        "When in doubt on a tech-adjacent topic → YES. We'd rather draft and have "
+        "brand-guard veto a bad draft than miss a relevant engagement.\n\n"
+        "Return ONLY a JSON object: "
+        '{"decision":"yes"|"no","confidence":<float 0..1>,"reason":<short string>}. '
+        "No prose, no markdown, no code fences."
+    )
+    user = (
+        f"=== brand context ===\n{audience_ctx}\n\n"
+        f"=== target post ===\n"
+        f"Author display: {op_display}\n"
+        f"Author handle: {op_handle}\n"
+        f"Post text:\n{post_text}\n\n"
+        "Decide. JSON only."
+    )
+    t0 = time.time()
+    try:
+        resp = httpx.post(
+            f"{cfg['base_url']}/chat/completions",
+            headers={"api-key": cfg["api_key"], "Content-Type": "application/json"},
+            json={
+                "model": cfg["model"],
+                "messages": [{"role": "system", "content": system},
+                             {"role": "user", "content": user}],
+                "max_tokens": 200,
+                "temperature": 0.2,
+            },
+            timeout=60,
+        )
+    except httpx.RequestError as e:
+        return {"decision": "no", "confidence": 0.0,
+                "reason": f"judge_error:http:{str(e)[:80]}"}
+    print(f"        … judge returned in {time.time()-t0:.1f}s "
+          f"(HTTP {resp.status_code})", flush=True)
+    if resp.status_code != 200:
+        return {"decision": "no", "confidence": 0.0,
+                "reason": f"judge_error:non-200:{resp.status_code}"}
+    raw = (resp.json().get("choices", [{}])[0].get("message", {})
+           .get("content") or "").strip()
+    # Strip code fences in case the model wraps despite instructions.
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        out = json.loads(raw)
+        decision = str(out.get("decision", "no")).strip().lower()
+        confidence = float(out.get("confidence", 0.5))
+        reason = str(out.get("reason", ""))[:240]
+    except (json.JSONDecodeError, ValueError, TypeError):
+        # LLMs occasionally emit malformed JSON (stray quote in a number,
+        # unescaped char, etc.) even after explicit instructions. Don't lose
+        # an otherwise-valid verdict to a typo — regex-recover decision,
+        # confidence, reason. If decision can't be recovered, fall back to "no".
+        m_dec = re.search(r'"decision"\s*:\s*"?(yes|no)"?', raw, re.IGNORECASE)
+        if not m_dec:
+            return {"decision": "no", "confidence": 0.0,
+                    "reason": f"judge_error:bad-json:{raw[:120]}"}
+        decision = m_dec.group(1).lower()
+        m_conf = re.search(r'"confidence"\s*:\s*([0-9]+(?:\.[0-9]+)?)', raw)
+        confidence = float(m_conf.group(1)) if m_conf else 0.5
+        m_reason = re.search(r'"reason"\s*:\s*"([^"]{1,240})"', raw)
+        reason = ((m_reason.group(1) if m_reason else "no-reason")
+                  + " [recovered from malformed JSON]")
+    if decision not in ("yes", "no"):
+        decision = "no"
+    confidence = max(0.0, min(1.0, confidence))
+    return {"decision": decision, "confidence": confidence, "reason": reason}
+
+
+# ─── Humanized visit + back-to-feed ───────────────────────────────────
+
+X_DETAIL_EXTRACT_JS = """
+(() => {
+  // On a post-detail page the focal post is the first article — but in some
+  // layouts it's the one with the tweet-detail aria-label. Try both.
+  const arts = Array.from(document.querySelectorAll('article[data-testid="tweet"]'));
+  if (arts.length === 0) return null;
+  const a = arts[0];
+  const u = a.querySelector('[data-testid="User-Name"]');
+  const t = a.querySelector('[data-testid="tweetText"]');
+  return {
+    author: u ? u.innerText.replace(/\\n/g, ' | ') : '',
+    text: t ? t.innerText : '',
+  };
+})()
+"""
+
+
+async def _humanly_visit_and_extract(post_url: str) -> dict:
+    """Humanly navigate to the post detail, dwell to read, extract focal-post
+    author + full text. Returns {"ok": bool, "author": str, "text": str}."""
+    async with _open_human_session() as s:
+        h = HumanCDP(s)
+        await s.navigate(post_url, settle_seconds=3.5)
+        # Wait for the focal article to render.
+        for _ in range(10):
+            present = await s.eval_js(
+                'document.querySelectorAll(\'article[data-testid="tweet"]\').length > 0',
+                await_promise=False)
+            if present:
+                break
+            await asyncio.sleep(1.0)
+        else:
+            return {"ok": False, "error": "detail_not_loaded"}
+        data = await s.eval_js(X_DETAIL_EXTRACT_JS, await_promise=False)
+        if not data:
+            return {"ok": False, "error": "detail_extract_failed"}
+        # Read-dwell proportional to post length — visible "I'm reading" signal.
+        await h.dwell_to_read(data.get("text") or "",
+                              floor_s=2.0, ceil_s=12.0)
+        # Gentle scroll on the detail page so we look like we're skimming
+        # the replies, then back to top.
+        await h.scroll(random.randint(400, 900))
+        await asyncio.sleep(random.uniform(0.8, 1.6))
+        await h.scroll(-random.randint(300, 600))
+        return {"ok": True, "author": data.get("author") or "",
+                "text": data.get("text") or ""}
+
+
+async def _humanly_back_to_feed(home_url: str = X_HOME_URL) -> None:
+    """Navigate back to the home feed and pause briefly — gives a human-looking
+    "returning to scroll" beat between visits."""
+    async with _open_human_session() as s:
+        h = HumanCDP(s)
+        await s.navigate(home_url, settle_seconds=2.5)
+        # Light scroll on return so we're not always sitting at scrollY=0.
+        await h.scroll(random.randint(200, 700))
+        await asyncio.sleep(random.uniform(0.6, 1.4))
+
+
+# Local random — separate import so the dwell/scroll randomness above isn't
+# accidentally affected by any seeding elsewhere.
+import random  # noqa: E402  (placed after functions for clarity)
+
+
 # ─── Topic scoring + filtering ────────────────────────────────────────
 
 def topic_score(text: str) -> tuple[int, list[str]]:
@@ -511,97 +748,304 @@ def is_promoted(item: dict) -> bool:
     return bool(item.get("promoted"))
 
 
-# ─── Mode: goodwill ───────────────────────────────────────────────────
+# ─── Mode: goodwill (scroll-and-read browse pattern) ─────────────────
+#
+# Human-pattern browse, not script crawl:
+#   1. Open x.com/home; wait for first articles.
+#   2. Loop, until max_visits clicks OR max_reads judgments OR 4 empty batches:
+#      a. Extract currently-visible posts.
+#      b. Drop ads/own/blocklist/skip-signal/already-seen (cheap pre-filter).
+#      c. Of the survivors, pick 1–3 at random (NOT in feed order — humans
+#         don't read top-to-bottom strictly).
+#      d. For each pick: judge from preview text (no click). If preview
+#         is empty (link/quote-tweet) we skip; if judge="no", mark read
+#         and move on; if judge="yes", click in, read full, draft, comment
+#         (outbox if --live, composer-pre-fill if dry), back to feed,
+#         restore scrollY so the next batch picks up where we were.
+#      e. End of batch → scroll: usually forward 0.8–2.0 viewports,
+#         15% chance of a back-scroll 0.4–0.8 viewports.
+#   3. Park cursor offscreen on exit.
+#
+# Caps:
+#   max_visits — clicks (the commenting budget).
+#   max_reads  — judgments (the LLM-cost budget; defaults higher because
+#                most reads are cheap rejections).
 
-def run_goodwill(handle: str, limit: int, min_score: int, scroll_passes: int,
-                 seen: dict, blocklist: dict) -> int:
-    print("\n=== Goodwill (X home feed → outbound engagement) ===")
+async def _goodwill_browse_pass(handle: str, max_visits: int, max_reads: int,
+                                 seen_goodwill: dict, blocklist: dict,
+                                 live: bool) -> tuple[int, int, int]:
+    drafted = 0
+    visited = 0
+    read = 0
+    self_marker = f"@{handle}".lower()
+
+    try:
+      async with _open_human_session() as s:
+        h = HumanCDP(s)
+        await s.navigate(X_HOME_URL, settle_seconds=4.0)
+
+        # Wait for first articles to render.
+        articles = 0
+        for _ in range(12):
+            n = await s.eval_js(
+                'document.querySelectorAll(\'article[data-testid="tweet"]\').length',
+                await_promise=False)
+            articles = int(n or 0)
+            if articles > 0:
+                break
+            await asyncio.sleep(1.5)
+        if articles == 0:
+            print("[goodwill] feed didn't load — empty or logged out?")
+            return 0, 0, 0
+        print(f"[goodwill] feed loaded ({articles} initial articles)")
+
+        empty_batches = 0
+        while visited < max_visits and read < max_reads and empty_batches < 4:
+            # 1. Snapshot what's currently visible.
+            visible = await s.eval_js(X_EXTRACT_FEED_JS, await_promise=False) or []
+
+            # 2. Pre-filter (cheap, no LLM).
+            fresh: list[dict] = []
+            for p in visible:
+                url = p.get("url")
+                if not url or url in seen_goodwill:
+                    continue
+                author_field = p.get("author") or ""
+                if self_marker in author_field.lower():
+                    seen_goodwill[url] = {"ts": utcnow(), "status": "own_post"}
+                    continue
+                if is_promoted(p):
+                    promoted_reasons = p.get("promoted_reasons") or []
+                    seen_goodwill[url] = {"ts": utcnow(), "status": "ad",
+                                          "promoted_reasons": promoted_reasons}
+                    _metrics.log_event("skipped_blocklist", platform="x",
+                                       mode="goodwill", parent_url=url,
+                                       reason="promoted_ad",
+                                       promoted_reasons=promoted_reasons)
+                    continue
+                if is_blocklisted(url, blocklist):
+                    seen_goodwill[url] = {"ts": utcnow(), "status": "blocklist"}
+                    continue
+                skip_hit, skip_word = has_skip_signal(p.get("text", ""))
+                if skip_hit:
+                    seen_goodwill[url] = {"ts": utcnow(),
+                                          "status": "skip_signal",
+                                          "word": skip_word}
+                    _metrics.log_event("skipped_blocklist", platform="x",
+                                       mode="goodwill", parent_url=url,
+                                       reason=f"skip_signal:{skip_word}")
+                    continue
+                fresh.append(p)
+
+            if not fresh:
+                empty_batches += 1
+                vw, vh = await h.viewport_size()
+                amount = int(vh * random.uniform(1.0, 1.8))
+                print(f"[batch] nothing fresh in view — scrolling +{amount}px")
+                await h.scroll(amount)
+                await h.jitter(2.0, 5.0)
+                continue
+            empty_batches = 0
+
+            # 3. Random-pick (not feed-order). 1–3 reads per batch.
+            random.shuffle(fresh)
+            batch_size = random.randint(1, min(3, len(fresh)))
+            batch = fresh[:batch_size]
+            print(f"\n[batch] {len(visible)} visible, {len(fresh)} fresh; "
+                  f"reading {batch_size} non-sequentially")
+
+            for post in batch:
+                if visited >= max_visits or read >= max_reads:
+                    break
+                read += 1
+                url = post["url"]
+                op_display = post.get("author") or ""
+                op_handle = author_handle(op_display)
+                preview = (post.get("text") or "").strip()
+
+                print(f"\n[read #{read}] {op_display}")
+                print(f"          URL:  {url}")
+                print(f"          Preview: {preview[:160]}")
+
+                if not preview:
+                    print("          (empty preview — would need click to read; skipping)")
+                    seen_goodwill[url] = {"ts": utcnow(),
+                                          "status": "empty_preview"}
+                    await h.jitter(1.5, 3.5)
+                    continue
+
+                # Judge from preview text — no click needed for the "no" case.
+                verdict = judge_audience_alignment(handle, op_handle,
+                                                   op_display, preview)
+                print(f"          Judge: {verdict['decision']}  "
+                      f"conf={verdict['confidence']:.2f}  "
+                      f"reason={verdict['reason'][:120]}")
+                _metrics.log_event("audience_judged", platform="x",
+                                   mode="goodwill", parent_url=url,
+                                   decision=verdict["decision"],
+                                   confidence=verdict["confidence"],
+                                   reason=verdict["reason"])
+
+                if verdict["decision"] != "yes":
+                    seen_goodwill[url] = {"ts": utcnow(),
+                                          "status": "judge_rejected",
+                                          "confidence": verdict["confidence"],
+                                          "reason": verdict["reason"]}
+                    await h.jitter(2.0, 5.0)
+                    continue
+
+                # YES → click into post to read full + draft + comment.
+                visited += 1
+                saved_scrollY = await s.eval_js("window.scrollY",
+                                                 await_promise=False) or 0
+
+                await s.navigate(url, settle_seconds=3.5)
+                detail_ok = False
+                for _ in range(8):
+                    n = await s.eval_js(
+                        'document.querySelectorAll(\'article[data-testid="tweet"]\').length',
+                        await_promise=False)
+                    if n and int(n) > 0:
+                        detail_ok = True
+                        break
+                    await asyncio.sleep(1.0)
+
+                full_text = preview
+                if detail_ok:
+                    detail = await s.eval_js(X_DETAIL_EXTRACT_JS,
+                                              await_promise=False)
+                    if detail and detail.get("text"):
+                        full_text = detail["text"]
+
+                # Human-read dwell proportional to length.
+                await h.dwell_to_read(full_text, floor_s=2.0, ceil_s=10.0)
+
+                # Draft.
+                op_first = author_first_name(op_display)
+                result = draft_goodwill_comment(handle, op_first,
+                                                 op_handle, full_text)
+                if result.get("decision") != "DRAFT":
+                    raw = (result.get("raw_draft") or "").strip()
+                    if raw:
+                        print(f"          Refused draft: {raw}")
+                    print(f"          SKIP — {result.get('reasons')}")
+                    _metrics.log_event("vetoed_brandguard", platform="x",
+                                       mode="goodwill", parent_url=url,
+                                       reasons=result.get("reasons"))
+                    seen_goodwill[url] = {"ts": utcnow(),
+                                          "status": "brandguard_refused",
+                                          "reasons": result.get("reasons")}
+                else:
+                    reply_text = result["draft"].strip()
+                    if result.get("autofixes"):
+                        print(f"          Autofixes: {result['autofixes']}")
+                    print(f"          Draft: {reply_text}")
+                    _metrics.log_event("drafted", platform="x",
+                                       mode="goodwill", parent_url=url,
+                                       chars=len(reply_text),
+                                       word_count=len(reply_text.split()),
+                                       length_target=result.get("length_target"),
+                                       autofixes=result.get("autofixes"),
+                                       confidence=verdict["confidence"])
+                    if live:
+                        try:
+                            outbox_id = _outbox.enqueue(
+                                platform="x", mode="goodwill",
+                                parent_url=url, draft_text=reply_text,
+                                metadata={
+                                    "op_handle": op_handle,
+                                    "op_display": op_display,
+                                    "judge_confidence": verdict["confidence"],
+                                    "judge_reason": verdict["reason"],
+                                    "autofixes": result.get("autofixes") or [],
+                                },
+                            )
+                            print(f"          ✓ queued outbox id={outbox_id}")
+                            seen_goodwill[url] = {"ts": utcnow(),
+                                                  "status": "queued",
+                                                  "outbox_id": outbox_id}
+                            drafted += 1
+                        except Exception as e:
+                            print(f"          FAIL queueing — {e}")
+                            seen_goodwill[url] = {"ts": utcnow(),
+                                                  "status": "queue_failed",
+                                                  "reason": str(e)[:200]}
+                    else:
+                        fill = await fill_composer_in_new_tab(url, reply_text)
+                        if fill.get("ok"):
+                            print("          ✓ composer tab pre-filled")
+                            seen_goodwill[url] = {"ts": utcnow(),
+                                                  "status": "drafted_dry"}
+                            drafted += 1
+                        else:
+                            print(f"          FAIL pre-fill — {fill.get('error')}")
+                            seen_goodwill[url] = {"ts": utcnow(),
+                                                  "status": "compose_failed",
+                                                  "reason": fill.get("error")}
+                        # Composer tab stole focus → bring home-feed tab back
+                        # to foreground so subsequent CDP calls aren't throttled
+                        # by Chrome's backgrounded-tab heuristics.
+                        try:
+                            await s.call("Page.bringToFront")
+                        except Exception:
+                            pass
+
+                # Back to feed + restore scroll so the next batch picks up
+                # where we left off (otherwise we'd always re-read the top).
+                await s.navigate(X_HOME_URL, settle_seconds=2.5)
+                await asyncio.sleep(1.0)
+                await s.eval_js(f"window.scrollTo(0, {saved_scrollY})",
+                                 await_promise=False)
+                await h.jitter(2.0, 5.0)
+
+            # End-of-batch scroll: usually forward, occasionally back.
+            vw, vh = await h.viewport_size()
+            if random.random() < 0.15:
+                back = -int(vh * random.uniform(0.4, 0.8))
+                print(f"[scroll] back {back}px (skim-back)")
+                await h.scroll(back)
+            else:
+                fwd = int(vh * random.uniform(0.8, 2.0))
+                print(f"[scroll] forward {fwd}px")
+                await h.scroll(fwd)
+            await h.jitter(1.5, 4.5)
+
+        await h.park_cursor_offscreen()
+    except (websockets.exceptions.ConnectionClosedError,
+            websockets.exceptions.ConnectionClosedOK,
+            asyncio.TimeoutError, TimeoutError) as e:
+        # CDP can become unresponsive when the home tab is backgrounded by
+        # Chrome's tab throttling (after a new composer tab steals focus),
+        # or when the websocket drops on idle. The seen-state dict was
+        # mutated in-place, so progress to this point is already persisted
+        # on the caller's side — just report partial counts and exit cleanly.
+        print(f"[goodwill] CDP unresponsive mid-pass "
+              f"({type(e).__name__}) — returning partial counts "
+              f"(drafted={drafted}, visited={visited}, read={read})",
+              file=sys.stderr)
+
+    return drafted, visited, read
+
+
+def run_goodwill(handle: str, max_visits: int, max_reads: int,
+                 seen: dict, blocklist: dict, live: bool) -> int:
+    """Sync wrapper around the async scroll-and-read browse pass."""
+    print("\n=== Goodwill (scroll-and-read; click only to comment) ===")
     if not ensure_cdp_chrome():
         print("[x] CDP Chrome unreachable on :9222", file=sys.stderr)
         return 0
-
-    print(f"[x] scanning x.com/home for niche-matching posts (score ≥ {min_score}) ...")
-    items = asyncio.run(_navigate_and_scroll_extract(X_HOME_URL, scroll_passes=scroll_passes))
-    if not items:
-        print("[x] nothing visible in feed (logged out? home feed empty?)")
-        return 0
-    print(f"[x] {len(items)} posts pulled from feed")
-
-    self_marker = f"@{handle}".lower()
     seen_goodwill = seen.setdefault("x_goodwill", {})
-
-    # Filter + score
-    candidates: list[dict] = []
-    skipped_own = skipped_promoted = skipped_skipsig = skipped_low_score = 0
-    for it in items:
-        if not it.get("url"):
-            continue
-        if self_marker in (it.get("author", "") or "").lower():
-            skipped_own += 1
-            continue
-        if is_promoted(it):
-            skipped_promoted += 1
-            continue
-        if is_blocklisted(it["url"], blocklist):
-            continue
-        if it["url"] in seen_goodwill:
-            continue
-        skip_hit, skip_word = has_skip_signal(it.get("text", ""))
-        if skip_hit:
-            skipped_skipsig += 1
-            continue
-        score, matched = topic_score(it.get("text", ""))
-        if score < min_score:
-            skipped_low_score += 1
-            continue
-        candidates.append({**it, "score": score, "matched": matched})
-
-    if skipped_own:
-        print(f"[x]   skipped {skipped_own} of your own posts in the feed")
-    if skipped_promoted:
-        print(f"[x]   skipped {skipped_promoted} promoted/ads")
-    if skipped_skipsig:
-        print(f"[x]   skipped {skipped_skipsig} post(s) with off-target signals")
-    if skipped_low_score:
-        print(f"[x]   skipped {skipped_low_score} post(s) below score {min_score}")
-
-    candidates.sort(key=lambda c: c["score"], reverse=True)
-    if not candidates:
-        print("[x] no goodwill candidates in current feed snapshot")
+    try:
+        drafted, visited, read = asyncio.run(_goodwill_browse_pass(
+            handle, max_visits, max_reads, seen_goodwill, blocklist, live))
+    except Exception as e:
+        import traceback
+        print(f"[goodwill] async pass crashed: {type(e).__name__}: {e}",
+              file=sys.stderr)
+        traceback.print_exc(file=sys.stderr)
         return 0
-    print(f"[x] {len(candidates)} candidate(s) for goodwill; engaging top {min(limit, len(candidates))}")
-
-    drafted = 0
-    for c in candidates[:limit]:
-        first = author_first_name(c["author"])
-        op_handle = author_handle(c["author"])
-        print(f"\n[goodwill #{drafted+1}] {c['author']}")
-        print(f"        URL:   {c['url']}")
-        print(f"        Score: {c['score']}  matched: {c['matched']}")
-        print(f"        Text:  {(c['text'] or '')[:200]}")
-        result = draft_goodwill_comment(handle, first, op_handle, c["text"] or "")
-        if result.get("decision") != "DRAFT":
-            raw = (result.get("raw_draft") or "").strip()
-            if raw:
-                print(f"        Refused draft: {raw}")
-            print(f"        SKIP — {result.get('reasons')}")
-            seen_goodwill[c["url"]] = {"ts": utcnow(), "status": "refused"}
-            continue
-        reply_text = result["draft"].strip()
-        if result.get("autofixes"):
-            print(f"        Autofixes: {result['autofixes']}")
-        print(f"        Draft: {reply_text}")
-        fill = asyncio.run(fill_composer_in_new_tab(c["url"], reply_text))
-        if not fill.get("ok"):
-            print(f"        FAIL — {fill.get('error')}")
-            continue
-        print(f"        ✓ new tab open with composer pre-filled — review and submit in Chrome")
-        seen_goodwill[c["url"]] = {"ts": utcnow(), "status": "drafted",
-                                   "score": c["score"], "matched": c["matched"]}
-        drafted += 1
-    # Back to home after the run so Chrome doesn't sit on a stale post.
-    asyncio.run(navigate_chrome_to(X_HOME_URL))
-    print(f"\n[goodwill] drafted {drafted} of {len(candidates[:limit])} candidates this pass")
+    print(f"\n[goodwill] read {read}, visited {visited}, drafted {drafted} "
+          f"(live={live})")
     return drafted
 
 
@@ -680,12 +1124,25 @@ def main() -> int:
     p = argparse.ArgumentParser(description=__doc__.split("\n\n")[0])
     p.add_argument("--mode", choices=["goodwill", "self-thread", "both"], default="both",
                    help="What to do. Default: both (goodwill then self-thread).")
+    p.add_argument("--max-visits", type=int, default=10,
+                   help="Goodwill: max posts to actually click INTO per pass "
+                        "(your commenting budget, default 10).")
+    p.add_argument("--max-reads", type=int, default=30,
+                   help="Goodwill: max posts to LLM-judge per pass (your "
+                        "judgment-cost budget, default 30). Most reads are "
+                        "cheap rejections; this caps the Flash bill.")
+    p.add_argument("--live", action="store_true",
+                   help="Goodwill: enqueue drafts to ~/.hermes/state/outbox.jsonl "
+                        "(outbox-flush.py submits them after the hold-buffer). "
+                        "Default is dry-run: composer-pre-fill tab, you submit manually.")
     p.add_argument("--limit", type=int, default=5,
-                   help="Max goodwill drafts per pass (default 5).")
+                   help="DEPRECATED — alias for --max-visits. Kept so old cron entries don't break.")
     p.add_argument("--min-score", type=int, default=1,
-                   help="Min niche-keyword matches a feed post needs to be a goodwill candidate (default 1).")
+                   help="DEPRECATED — keyword scoring was replaced by the LLM audience judge. "
+                        "Ignored in the new flow.")
     p.add_argument("--scroll-passes", type=int, default=5,
-                   help="How many times to scroll the home feed before extracting (default 5).")
+                   help="DEPRECATED — the scroll-and-read loop manages its own scrolling. "
+                        "Ignored in the new flow.")
     p.add_argument("--within-minutes", type=int, default=60,
                    help="Self-thread: only target posts within last N minutes (default 60).")
     p.add_argument("--reset-seen", action="store_true",
@@ -707,13 +1164,20 @@ def main() -> int:
         print("[x] couldn't read X handle from BRAND.md — aborting", file=sys.stderr)
         return 2
 
+    # --limit is the deprecated alias for --max-visits. We only fall back to
+    # --limit if the user didn't pass an explicit --max-visits. Detecting that
+    # by checking against the parser default keeps the explicit flag winning.
+    user_set_max_visits = "--max-visits" in sys.argv
+    effective_max_visits = args.max_visits if user_set_max_visits else args.limit
+
     def _one_pass() -> int:
         seen = load_seen()
         blocklist = load_blocklist()
         drafted = 0
         if args.mode in ("goodwill", "both"):
-            drafted += run_goodwill(handle, args.limit, args.min_score, args.scroll_passes,
-                                    seen, blocklist)
+            drafted += run_goodwill(handle, effective_max_visits,
+                                    args.max_reads, seen, blocklist,
+                                    args.live)
         if args.mode in ("self-thread", "both"):
             drafted += run_self_thread(handle, args.within_minutes, seen, blocklist)
         save_seen(seen)

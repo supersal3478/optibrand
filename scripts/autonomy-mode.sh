@@ -179,6 +179,53 @@ ok "daily-report: 23:55 every day"
 run "$HERMES_BIN cron add --name voice-retrain '0 2 * * 0' '$RETRAIN_PROMPT'"
 ok "voice-retrain: Sunday 02:00"
 
+# ─── 4b. Phase-2 X engagement orchestrators ───────────────────────────
+#
+# All times below are TORONTO LOCAL (America/Toronto), because macOS cron
+# doesn't honor TZ in crontab and the user's SGT posting schedule converts to
+# fixed Toronto times. Update these if DST shifts the SGT→Toronto offset.
+#
+# Goodwill fires 30 min before each SGT post (6/day every day):
+#   SGT 02:00 → Toronto T-30 = 13:30 (prev day)
+#   SGT 07:00 → Toronto T-30 = 18:30 (prev day)
+#   SGT 09:00 → Toronto T-30 = 20:30 (prev day)
+#   SGT 16:00 → Toronto T-30 = 03:30
+#   SGT 18:00 → Toronto T-30 = 05:30
+#   SGT 22:00 → Toronto T-30 = 09:30
+GOODWILL_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/feed-engagement.py --mode goodwill --max-visits 3 --max-reads 20 --live"
+
+INBOUND_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/inbound-engagement.py --platforms x --limit 5 --live"
+
+COMMENTER_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/engage-commenter.py --max-commenters 3 --max-per-commenter 1 --live"
+
+FLUSH_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/outbox-flush.py --batch 1"
+
+# Clean removal of any prior X-engagement cron entries.
+for J in goodwill-0330 goodwill-0530 goodwill-0930 goodwill-1330 goodwill-1830 goodwill-2030 inbound-monitor engage-commenter outbox-flush; do
+  run "$HERMES_BIN cron remove $J 2>/dev/null || true"
+done
+
+# Goodwill — 6 triggers, Toronto-local.
+run "$HERMES_BIN cron add --name goodwill-0330 '30 3 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-0530 '30 5 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-0930 '30 9 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-1330 '30 13 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-1830 '30 18 * * *' '$GOODWILL_PROMPT'"
+run "$HERMES_BIN cron add --name goodwill-2030 '30 20 * * *' '$GOODWILL_PROMPT'"
+ok "goodwill: 6 triggers (Toronto 03:30/05:30/09:30/13:30/18:30/20:30 = T-30 before SGT posts)"
+
+# Inbound monitor — replies to comments on YOUR posts. Every 10 min.
+run "$HERMES_BIN cron add --name inbound-monitor '*/10 * * * *' '$INBOUND_PROMPT'"
+ok "inbound-monitor: every 10 min (drafts → outbox; 30-min hold buffer)"
+
+# Commenter follow-up — engage commenters on their own posts. Every 15 min.
+run "$HERMES_BIN cron add --name engage-commenter '*/15 * * * *' '$COMMENTER_PROMPT'"
+ok "engage-commenter: every 15 min (pops commenter_queue.jsonl)"
+
+# Outbox flush — submits + likes matured drafts. Every 2 min.
+run "$HERMES_BIN cron add --name outbox-flush '*/2 * * * *' '$FLUSH_PROMPT'"
+ok "outbox-flush: every 2 min (humanly submits + likes from outbox)"
+
 # ─── 5. Summary ─────────────────────────────────────────────────
 cat <<EOF
 
@@ -190,7 +237,14 @@ Configuration applied:
   • phase=2, linkedin.live=true, x.live=true
   • hold_buffer_inbound_seconds=${HOLD_BUFFER} ($([ "$HOLD_BUFFER" = "0" ] && echo 'immediate post' || echo 'review queue'))
   • X path: ${X_PATH}
-  • Three cron jobs registered: schedule-tick (* * * * *), daily-report (55 23 * * *), voice-retrain (0 2 * * 0)
+  • Cron jobs registered:
+      schedule-tick  — every minute  (legacy orchestrator)
+      daily-report   — 23:55 daily
+      voice-retrain  — Sunday 02:00
+      goodwill x6    — Toronto 03:30 / 05:30 / 09:30 / 13:30 / 18:30 / 20:30 (T-30 before each SGT post)
+      inbound-mon    — every 10 min  (replies to YOUR comments)
+      eng-commenter  — every 15 min  (goodwill follow-up on commenters)
+      outbox-flush   — every 2 min   (humanly submits + likes from outbox)
 
 $(c_yellow 'NEXT STEPS:')
 
