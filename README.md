@@ -54,7 +54,8 @@ brand-growth-engine/
 │   ├── bootstrap.sh         # interactive 12-gate new-laptop walkthrough
 │   ├── autonomy-mode.sh     # flips caps to phase 2 + registers cron jobs
 │   ├── schedule-tick.py     # per-minute orchestrator (publish/monitor/reply)
-│   ├── engagement-test.py   # manual engagement loop — scan, draft, pre-fill composer (docs: docs/engagement-test.md)
+│   ├── engagement-test.py   # inbound engagement loop — scan replies, draft, pre-fill composer (docs: docs/engagement-test.md)
+│   ├── feed-engagement.py   # outbound goodwill + self-thread continuations (docs: docs/feed-engagement.md)
 │   ├── voice-train.py       # builds ~/.hermes/memories/voice_profile.json
 │   ├── ingest-corpus.py     # normalizes corpus/*.jsonl → _normalized.jsonl
 │   └── daily-report.py      # renders the daily report
@@ -195,6 +196,22 @@ Full architecture, configuration, and troubleshooting in
 against engaging with the wrong post (pinned-flag detection + URL blocklist +
 max-age cutoff), inline brand-guard with em-dash auto-strip, and back-to-profile
 navigation between posts so the browser doesn't look stuck.
+
+For the **outbound** side — goodwill engagement on the X home feed 30 min
+before your scheduled posts drop, plus thread continuations on your own
+posts — see [`scripts/feed-engagement.py`](scripts/feed-engagement.py) and
+its docs at [`docs/feed-engagement.md`](docs/feed-engagement.md). Same
+direct-Azure + CDP-tab pattern as engagement-test.py.
+
+```bash
+# 30 min before you post: warm the feed
+./vendor/hermes-agent/.venv/bin/python scripts/feed-engagement.py \
+    --mode goodwill --limit 5
+
+# 5 min after you post: draft a thread continuation
+./vendor/hermes-agent/.venv/bin/python scripts/feed-engagement.py \
+    --mode self-thread --within-minutes 30
+```
 
 ## Phased rollout (gates)
 
