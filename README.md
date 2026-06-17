@@ -54,6 +54,7 @@ brand-growth-engine/
 │   ├── bootstrap.sh         # interactive 12-gate new-laptop walkthrough
 │   ├── autonomy-mode.sh     # flips caps to phase 2 + registers cron jobs
 │   ├── schedule-tick.py     # per-minute orchestrator (publish/monitor/reply)
+│   ├── engagement-test.py   # manual engagement loop — scan, draft, pre-fill composer (docs: docs/engagement-test.md)
 │   ├── voice-train.py       # builds ~/.hermes/memories/voice_profile.json
 │   ├── ingest-corpus.py     # normalizes corpus/*.jsonl → _normalized.jsonl
 │   └── daily-report.py      # renders the daily report
@@ -169,6 +170,31 @@ The autonomous way (Phase 1+):
 ```
 
 (`hermes cron` and `hermes gateway` are real subcommands — see `hermes <cmd> --help`.)
+
+## Manual engagement loop (Phase-2-supervised)
+
+For the in-between phase — you're posting on X/LinkedIn manually, and you want
+help drafting replies in your voice without going fully autonomous —
+[`scripts/engagement-test.py`](scripts/engagement-test.py) scans your recent
+posts for unanswered third-party replies, drafts responses via direct Azure
+DeepSeek-V4-Flash (~10s/draft), and opens a new tab in your CDP Chrome with
+the composer pre-filled. You review and click Reply yourself.
+
+```bash
+# One pass — scan, draft, exit.
+./vendor/hermes-agent/.venv/bin/python scripts/engagement-test.py \
+    --platforms x --source my-posts
+
+# Watch — keep polling every 90s, stop when something gets drafted.
+./vendor/hermes-agent/.venv/bin/python scripts/engagement-test.py \
+    --platforms x --source my-posts --watch
+```
+
+Full architecture, configuration, and troubleshooting in
+[`docs/engagement-test.md`](docs/engagement-test.md). Three-layer defense
+against engaging with the wrong post (pinned-flag detection + URL blocklist +
+max-age cutoff), inline brand-guard with em-dash auto-strip, and back-to-profile
+navigation between posts so the browser doesn't look stuck.
 
 ## Phased rollout (gates)
 

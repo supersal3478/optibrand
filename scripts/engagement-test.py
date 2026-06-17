@@ -45,7 +45,7 @@ CDP_PORT = 9222
 X_MENTIONS_URL = "https://x.com/notifications/mentions"
 X_COMPOSER_SELECTOR = 'div[data-testid="tweetTextarea_0"]'
 X_SETTLE_SECONDS = 10  # X SPA is slow; profile took 12s in practice
-X_RECENT_POSTS_LIMIT = 10  # cap how many of my recent posts to inspect for replies
+X_RECENT_POSTS_LIMIT = 40  # cap how many of my recent posts to inspect for replies
 
 # Pull all visible items (mentions OR my own posts) on the current page.
 # Includes pinned-flag detection (X marks pinned posts with a 'Pinned' socialContext)
@@ -359,12 +359,17 @@ async def _ws_call(ws, mid: int, method: str, params: dict | None = None) -> dic
             return data
 
 
-async def _navigate_and_extract(url: str, max_wait_s: float = 25.0) -> list[dict]:
-    """Navigate the existing x.com tab to `url`, poll for articles to appear, extract.
+async def _navigate_and_extract(url: str, max_wait_s: float = 25.0,
+                                scroll_passes: int = 0) -> list[dict]:
+    """Navigate the existing x.com tab to `url`, poll for articles, optionally scroll
+    to load more, then extract.
 
-    X's SPA renders timelines lazily; the initial Page.navigate returns immediately but
-    article[data-testid=tweet] elements may not exist for 10–15s. Poll every 2s until
-    at least one article appears or we hit max_wait_s.
+    X's SPA renders timelines lazily:
+      - The initial Page.navigate returns immediately; article[data-testid=tweet]
+        elements may not exist for 10–15s.
+      - Even after they appear, only the first 2–3 are above-the-fold. To see more
+        posts on a profile, you have to scroll. We do scroll_passes window.scrollBy
+        calls with a 1.5s wait each, which X uses to lazy-load the next batch.
     """
     tab = cdp_find_tab("x.com")
     if not tab:
@@ -372,11 +377,11 @@ async def _navigate_and_extract(url: str, max_wait_s: float = 25.0) -> list[dict
         await asyncio.sleep(3)
     async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
         await _ws_call(ws, 1, "Page.navigate", {"url": url})
-        # Initial settle for the DOM swap, then poll for articles.
         await asyncio.sleep(3)
         mid = 2
         elapsed = 3.0
         articles = 0
+        # Phase 1: wait for the FIRST article to appear.
         while elapsed < max_wait_s:
             r = await _ws_call(ws, mid, "Runtime.evaluate", {
                 "expression": 'document.querySelectorAll("article[data-testid=\\"tweet\\"]").length',
@@ -391,7 +396,26 @@ async def _navigate_and_extract(url: str, max_wait_s: float = 25.0) -> list[dict
         if articles == 0:
             print(f"[x]   (still 0 articles after {elapsed:.0f}s — page may be empty or DOM shifted)",
                   flush=True)
-        # Now do the real extraction.
+            return []
+        # Phase 2: scroll to load more posts. X lazy-loads each scroll.
+        for i in range(scroll_passes):
+            await _ws_call(ws, mid, "Runtime.evaluate", {
+                "expression": "window.scrollBy(0, window.innerHeight * 1.5); true",
+                "userGesture": True,
+            })
+            mid += 1
+            await asyncio.sleep(1.8)
+            r = await _ws_call(ws, mid, "Runtime.evaluate", {
+                "expression": 'document.querySelectorAll("article[data-testid=\\"tweet\\"]").length',
+                "returnByValue": True,
+            })
+            mid += 1
+            new_count = r.get("result", {}).get("result", {}).get("value") or 0
+            print(f"[x]   scroll #{i+1}: {new_count} articles loaded", flush=True)
+            if new_count == articles:
+                break  # no more lazy-load to be had
+            articles = new_count
+        # Phase 3: extract.
         result = await _ws_call(ws, mid, "Runtime.evaluate", {
             "expression": X_EXTRACT_MENTIONS_JS,
             "userGesture": True,
@@ -405,18 +429,20 @@ async def fetch_x_mentions() -> list[dict]:
 
 
 async def fetch_x_my_recent_posts(handle: str, max_age_days: int = 14,
-                                  blocklist: dict | None = None) -> list[dict]:
+                                  blocklist: dict | None = None,
+                                  scroll_passes: int = 4) -> list[dict]:
     """Scrape my profile timeline for posts that:
       - have ≥1 reply
       - are NOT pinned (X marks pinned posts via socialContext "Pinned")
       - are NOT in the user-curated blocklist
       - are posted within the last `max_age_days` days
 
+    Scrolls the profile `scroll_passes` times to load more posts beyond above-the-fold.
     Three defense layers (any one blocks): pinned-flag, blocklist, age cutoff.
     Returns [{url, text, reply_count, ts, age_days}, ...].
     """
     blocklist = blocklist or {"x": [], "linkedin": []}
-    items = await _navigate_and_extract(f"https://x.com/{handle}")
+    items = await _navigate_and_extract(f"https://x.com/{handle}", scroll_passes=scroll_passes)
     cutoff = datetime.now(tz=ZoneInfo("UTC")) - __import__("datetime").timedelta(days=max_age_days)
     out = []
     skipped_pinned = 0
@@ -472,6 +498,20 @@ def fetch_x_replies_to_post(post_url: str) -> list[dict]:
     if not parsed or not parsed.get("ok"):
         return []
     return parsed.get("comments") or parsed.get("new_comments") or []
+
+
+async def navigate_chrome_to(url: str, settle_seconds: float = 3.0) -> None:
+    """Navigate the existing x.com tab to a URL — used for the 'back to profile'
+    behavior after reading a post's replies, so Chrome doesn't sit on a stale post."""
+    tab = cdp_find_tab("x.com")
+    if not tab:
+        return
+    try:
+        async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
+            await _ws_call(ws, 1, "Page.navigate", {"url": url})
+            await asyncio.sleep(settle_seconds)
+    except Exception:
+        pass  # navigate-back is cosmetic; don't crash the loop if Chrome went away
 
 
 async def fill_composer_in_new_tab(tweet_url: str, text: str,
@@ -555,11 +595,13 @@ def _collect_x_items(source: str, max_age_days: int = 14) -> list[dict]:
             if not my_posts:
                 print(f"[x] no recent (≤{max_age_days}d) posts with replies on @{self_handle}'s timeline")
             skipped_self = 0
-            for post in my_posts:
+            profile_url = f"https://x.com/{self_handle}"
+            for i, post in enumerate(my_posts, 1):
                 age = post.get("age_days")
                 age_str = f"{age}d ago" if age is not None else "age?"
-                print(f"[x]   post w/ {post['reply_count']} replies ({age_str}): {post['url']}")
+                print(f"[x]   post {i}/{len(my_posts)} ({post['reply_count']} replies, {age_str}): {post['url']}")
                 replies = fetch_x_replies_to_post(post["url"])
+                new_for_this_post = 0
                 for r in replies:
                     author = (r.get("author") or "").lower()
                     # Skip our own thread continuations — author field has '@salaicreates' in it
@@ -572,8 +614,16 @@ def _collect_x_items(source: str, max_age_days: int = 14) -> list[dict]:
                         "url": r.get("url", ""),
                         "parent_post_url": post["url"],
                     })
+                    new_for_this_post += 1
                 if not replies:
                     print(f"[x]     (fetch-comments returned 0 — slow render or dom-shift)")
+                elif new_for_this_post == 0:
+                    print(f"[x]     no third-party replies on this post (all self or already seen)")
+                else:
+                    print(f"[x]     {new_for_this_post} third-party reply/replies queued")
+                # Click back to profile so Chrome doesn't sit on the post URL between iterations.
+                print(f"[x]     ↩ back to profile")
+                asyncio.run(navigate_chrome_to(profile_url))
             if skipped_self:
                 print(f"[x] skipped {skipped_self} self-authored reply/thread continuation(s)")
             if items or source == "my-posts":
@@ -711,8 +761,8 @@ def main() -> int:
                    help="Poll on an interval. Default: exit on first iteration that drafts ≥1 reply.")
     p.add_argument("--keep-going", action="store_true",
                    help="With --watch: keep polling forever, even after drafts are found. Ctrl-C to stop.")
-    p.add_argument("--interval-seconds", type=int, default=300,
-                   help="With --watch: seconds between polls (default 300 = 5 min).")
+    p.add_argument("--interval-seconds", type=int, default=90,
+                   help="With --watch: seconds between polls (default 90s — tight enough to feel responsive).")
     args = p.parse_args()
 
     if args.reset_seen and SEEN_PATH.exists():
