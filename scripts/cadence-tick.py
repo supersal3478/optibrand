@@ -46,17 +46,23 @@ def run_tick(platform: str, dry_run: bool, verbose: bool) -> int:
     now = datetime.now().astimezone()
     fired = 0
 
-    # OUTBOUND (feed goodwill) — only X has a feed-read/goodwill path today.
-    # LinkedIn has no feed scraper yet, so there's nothing to fire for it.
-    if platform == "x":
+    # OUTBOUND (feed goodwill). Each platform has its own feed→draft→outbox tool;
+    # firing only DRAFTS into the hold-buffer (outbox-flush posts later, under
+    # caps + per-post approval). LinkedIn's feed scrape is headed + slower.
+    OUTBOUND = {
+        "x": ([sys.executable, str(SCRIPTS / "feed-engagement.py"),
+               "--mode", "goodwill", "--max-visits", "1", "--limit", "1", "--live"], 300),
+        "linkedin": ([sys.executable, str(SCRIPTS / "li-feed-engagement.py"),
+                      "--max-comments", "1", "--limit", "5", "--live"], 600),
+    }
+    if platform in OUTBOUND:
         act_out, why_out = _cadence.should_act_outbound(now, platform)
         if verbose or dry_run:
             print(f"[outbound] {'ACT' if act_out else 'skip'} — {why_out}")
         if act_out and not dry_run:
+            cmd, out_timeout = OUTBOUND[platform]
             _metrics.log_event("cadence_fire", platform=platform, mode="outbound")
-            _fire([sys.executable, str(SCRIPTS / "feed-engagement.py"),
-                   "--mode", "goodwill", "--max-visits", "1", "--limit", "1", "--live"],
-                  timeout=300, verbose=verbose)
+            _fire(cmd, timeout=out_timeout, verbose=verbose)
             fired += 1
     elif verbose or dry_run:
         print(f"[outbound] skip — no goodwill/feed path for {platform} yet")

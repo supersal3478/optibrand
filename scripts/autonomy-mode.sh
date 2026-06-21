@@ -244,7 +244,7 @@ ok "cadence-tick: every minute (X human-rhythm sessions + inbound decay)"
 # Armed only if lipy is logged in.
 if [[ "${LI_READY:-0}" == "1" ]]; then
   run "$HERMES_BIN cron add --name cadence-tick-li '* * * * *' '$CADENCE_LI_PROMPT'"
-  ok "cadence-tick-li: every minute (LinkedIn inbound replies, human decay)"
+  ok "cadence-tick-li: every minute (LinkedIn feed goodwill + inbound replies, human decay)"
 else
   warn "cadence-tick-li: SKIPPED (LinkedIn not warmed — lipy login --headed, then re-run)"
 fi
