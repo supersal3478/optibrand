@@ -76,10 +76,19 @@ def _blocked_terms() -> list[str]:
     try:
         import yaml
         data = yaml.safe_load(BLOCKLIST.read_text()) or {}
-        terms = []
-        for key in ("keywords", "accounts", "handles", "domains"):
-            terms += [str(t).lower() for t in (data.get(key) or [])]
-        return terms
+        terms: list[str] = []
+        # Flat lists of substrings.
+        for key in ("keywords", "domains", "accounts"):
+            v = data.get(key)
+            if isinstance(v, list):
+                terms += [str(t).lower() for t in v]
+        # `handles` is a dict {platform: [slugs]} — take the LinkedIn slugs only.
+        # (Iterating the dict directly yielded its KEYS "x"/"linkedin"/"youtube",
+        # and "x" as a substring blocked essentially every post.)
+        handles = data.get("handles")
+        if isinstance(handles, dict):
+            terms += [str(t).lower() for t in (handles.get("linkedin") or [])]
+        return [t for t in terms if t]
     except Exception:
         return []
 

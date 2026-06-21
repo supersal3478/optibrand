@@ -785,10 +785,71 @@ def cmd_posts(args: argparse.Namespace) -> int:
     return 0
 
 
+# Home-feed selectors. The feed is a virtualized LazyColumn; off-screen cards
+# are dehydrated, so we walk cards by scrolling each into view before reading.
+_FEED_CONTAINER_SEL = '[componentkey="container-update-list_mainFeed-lazy-container"]'
+# The post's overflow "..." button. aria-label is "Open control menu for post by
+# <Author>" (English) / "Buka menu kawalan untuk paparan oleh <Author>" (Malay).
+# It's present on every real post card and gives us the author language-free.
+_FEED_CTRL_BTN_SEL = ('button[aria-label^="Open control menu for post"], '
+                      'button[aria-label^="Buka menu kawalan untuk paparan"]')
+
+
+def _feed_cards(page) -> list:
+    """Direct children of the home-feed lazy container = the post cards."""
+    c = (page.query_selector(_FEED_CONTAINER_SEL)
+         or page.query_selector('[componentkey*="mainFeed"]'))
+    if not c:
+        return []
+    return c.query_selector_all(":scope > div")
+
+
+def _urn_from_control_menu(page, card) -> str | None:
+    """Open a post's '...' control menu and read the post URN from the
+    Embed/Report item href (these carry ?targetUrn= / ?entityUrn=, which is
+    language-independent). Closes the menu afterwards. Authoritative fallback
+    when the card exposes no inline-comment / tracking URN."""
+    btn = card.query_selector(_FEED_CTRL_BTN_SEL)
+    if not btn:
+        return None
+    try:
+        btn.click(timeout=4000)
+    except Exception:
+        return None
+    _jitter(0.6, 1.2)
+    urn = None
+    try:
+        urn = page.evaluate(r"""() => {
+            const links = document.querySelectorAll(
+                'a[href*="targetUrn="], a[href*="entityUrn="], '
+                + 'a[href*="/embed-modal/"], a[href*="/report-in-modal/"]');
+            for (const a of links) {
+                const h = decodeURIComponent(a.getAttribute('href') || '');
+                const m = h.match(/urn:li:(?:share|activity|ugcPost):[0-9]+/);
+                if (m) return m[0];
+            }
+            return null;
+        }""")
+    except Exception:
+        urn = None
+    try:
+        page.keyboard.press("Escape")  # close the menu
+    except Exception:
+        pass
+    _jitter(0.3, 0.7)
+    return urn
+
+
 def _scrape_feed(page, limit: int) -> list[dict]:
-    """Scroll the LinkedIn HOME feed and harvest posts from OTHERS to engage with.
-    Returns up to `limit` items: [{urn, url, author, text}]. Skips promoted posts
-    and empty bodies. Mirrors _scrape_posts but on /feed/ and pulls the author."""
+    """Scroll the LinkedIn HOME feed (run HEADED — it's gated against headless)
+    and harvest posts from OTHERS to goodwill-comment on. Returns up to `limit`
+    items: [{urn, url, author, text}].
+
+    The feed is a virtualized LazyColumn: off-screen cards are dehydrated, so we
+    scroll EACH card into view (forcing hydration) before reading it. The post
+    URN is not on the wrapper — we take it from inline-comment keys when present,
+    else from the control-menu Embed/Report href. Author comes from the
+    control-menu button's aria-label (works regardless of UI language)."""
     page.goto("https://www.linkedin.com/feed/",
               wait_until="domcontentloaded", timeout=30_000)
     try:
@@ -797,56 +858,100 @@ def _scrape_feed(page, limit: int) -> list[dict]:
         pass
     _jitter(2.0, 3.5)
 
-    seen: set[str] = set()
     posts: list[dict] = []
-    for _ in range(15):
-        cards = page.query_selector_all(
-            '[data-urn^="urn:li:activity:"], [data-id^="urn:li:activity:"]'
-        )
+    seen_urns: set[str] = set()
+    stale_rounds = 0
+    for _round in range(25):
+        if len(posts) >= limit:
+            break
+        cards = _feed_cards(page)
+        before = len(cards)
+        progressed = False
         for card in cards:
-            urn = card.get_attribute("data-urn") or card.get_attribute("data-id")
-            if not urn or urn in seen:
-                continue
-            seen.add(urn)
+            if len(posts) >= limit:
+                break
             try:
-                chrome_txt = card.inner_text()
+                if card.get_attribute("data-lipy-seen"):
+                    continue
             except Exception:
-                chrome_txt = ""
-            if re.search(r"\bPromoted\b|\bSponsored\b", chrome_txt, re.I):
-                continue  # skip ads
+                continue
+            try:
+                card.scroll_into_view_if_needed(timeout=4000)
+            except Exception:
+                continue
+            _jitter(1.0, 1.8)  # let the LazyColumn hydrate
+            try:
+                page.evaluate("(el) => el.setAttribute('data-lipy-seen','1')", card)
+            except Exception:
+                pass
+            progressed = True
+
+            # Author from the control-menu button's aria-label.
             author = ""
-            a_el = (
-                card.query_selector('.update-components-actor__title span[aria-hidden="true"]')
-                or card.query_selector('.update-components-actor__name span[aria-hidden="true"]')
-                or card.query_selector('.update-components-actor__title')
-                or card.query_selector('.update-components-actor__name')
-            )
-            if a_el:
-                try:
-                    author = re.sub(r"\s+", " ", a_el.inner_text()).strip()[:120]
-                except Exception:
-                    author = ""
-            body = ""
+            btn = card.query_selector(_FEED_CTRL_BTN_SEL)
+            if btn:
+                al = btn.get_attribute("aria-label") or ""
+                am = re.search(r"(?:post by|paparan oleh)\s+(.+)$", al, re.I)
+                if am:
+                    author = am.group(1).strip()[:120]
+
+            # Body.
             body_el = (
-                card.query_selector('.update-components-text')
-                or card.query_selector('.feed-shared-update-v2__description')
-                or card.query_selector('[componentkey^="feed-commentary_"]')
+                card.query_selector('[componentkey^="feed-commentary_"]')
+                or card.query_selector('[data-testid="expandable-text-box"]')
+                or card.query_selector('.update-components-text')
             )
+            body = ""
             if body_el:
                 try:
                     body = re.sub(r"\s+", " ", body_el.inner_text()).strip()[:1500]
                 except Exception:
                     body = ""
-            if not body:
-                continue  # nothing to engage with
-            _remember_urn(activity_urn=urn, ugc_urn=None, post_text=body)
+            if not body or not author:
+                continue  # chrome row / unhydrated / not a real post
+
+            # Skip promoted (English + Malay).
+            try:
+                chrome_txt = card.inner_text()
+            except Exception:
+                chrome_txt = ""
+            if re.search(r"\bPromoted\b|\bSponsored\b|\bDipromosikan\b|\bDitaja\b",
+                         chrome_txt, re.I):
+                continue
+
+            # URN: cheap (inline-comment / tracking) first, else control menu.
+            urn = None
+            try:
+                html = card.inner_html()
+            except Exception:
+                html = ""
+            m = re.search(r"urn:li:(?:activity|ugcPost):\d+", html)
+            if m:
+                urn = m.group(0)
+            if not urn:
+                urn = _urn_from_control_menu(page, card)
+            if not urn or urn in seen_urns:
+                continue
+            seen_urns.add(urn)
+
+            if urn.startswith("urn:li:activity:"):
+                _remember_urn(activity_urn=urn, ugc_urn=None, post_text=body)
+            elif urn.startswith("urn:li:ugcPost:"):
+                _remember_urn(activity_urn=None, ugc_urn=urn, post_text=body)
             posts.append({"urn": urn,
                           "url": f"https://www.linkedin.com/feed/update/{urn}/",
                           "author": author, "text": body})
-            if len(posts) >= limit:
-                return posts
-        page.mouse.wheel(0, 3000)
-        _jitter(2.0, 4.0)
+
+        # Need more cards: scroll to append to the virtualized list.
+        page.mouse.wheel(0, 2600)
+        _jitter(1.6, 2.6)
+        after = len(_feed_cards(page))
+        if after <= before and not progressed:
+            stale_rounds += 1
+            if stale_rounds >= 3:
+                break
+        else:
+            stale_rounds = 0
     return posts
 
 
@@ -1875,7 +1980,10 @@ def main() -> int:
     feed = sp.add_parser("feed",
         help="Scrape the home feed for others' posts to goodwill-comment on.")
     feed.add_argument("--limit", type=int, default=10)
-    feed.add_argument("--headed", action="store_true")
+    feed.add_argument("--headed", action="store_true", default=True,
+                      help="visible browser (default; the home feed is gated "
+                           "against headless scraping)")
+    feed.add_argument("--headless", dest="headed", action="store_false")
     feed.set_defaults(fn=cmd_feed)
 
     session = sp.add_parser("session",
