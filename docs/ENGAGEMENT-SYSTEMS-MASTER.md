@@ -5,8 +5,14 @@ systems — the methodology, the architecture, every script and its status, what
 has been tested, and a precise build-plan for what remains. Written so a new
 engineer or AI can continue the build without re-deriving context.
 
-**Last updated:** 2026-06-21. **Branch:** `macmini-live`. **Runs on:** the Mac
+**Last updated:** 2026-06-22. **Branch:** `macmini-live`. **Runs on:** the Mac
 mini (the always-on machine); this desktop is for editing/review.
+
+> **▶ Setting this up on a NEW laptop / handing to a new agent?** Start with
+> [NEW-MACHINE-RUNBOOK.md](NEW-MACHINE-RUNBOOK.md) — the step-by-step *executable*
+> guide to install, log in, arm **both X and LinkedIn on the human-rhythm cadence**,
+> and the must-read note on what "run automatically" actually does (it posts
+> without asking). This master doc is the *why* / architecture reference behind it.
 
 > **Commit status note.** Everything described here is committed + pushed on
 > `macmini-live` (through the LinkedIn goodwill build). After a `git pull` on the
