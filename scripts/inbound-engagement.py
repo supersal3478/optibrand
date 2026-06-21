@@ -601,13 +601,41 @@ async def fill_composer_in_new_tab(tweet_url: str, text: str,
 
 # ─── LinkedIn side ────────────────────────────────────────────────────
 
+def _li_self_name() -> str | None:
+    """Your LinkedIn display name from BRAND.md (**Name:** …), to skip your own
+    comments when scanning inbound."""
+    try:
+        for line in (PROJECT_ROOT / "BRAND.md").read_text().splitlines():
+            s = line.strip()
+            if s.startswith("**Name:**"):
+                return s.split("**Name:**", 1)[1].strip() or None
+    except OSError:
+        pass
+    return None
+
+
 def fetch_li_inbound(limit: int) -> dict:
-    """Returns lipy inbound result. {ok: bool, items: [...]} on success."""
-    rc, out, err = _run([str(LIPY_BIN), "inbound", "--limit", str(limit)], timeout=120)
+    """Flatten lipy inbound (posts each with a nested `comments` list) into a flat
+    list of OTHER people's comments to reply to: {ok, items:[{urn, author, text,
+    post_url}]}. The `urn` is the comment URN that `lipy reply --parent` needs."""
+    rc, out, err = _run([str(LIPY_BIN), "inbound", "--limit", str(limit)], timeout=180)
     parsed = _parse_json(out)
-    if not parsed:
+    if not parsed or not parsed.get("ok"):
         return {"ok": False, "error": (err or out).strip()[:300]}
-    return parsed
+    me = _li_self_name()
+    items = []
+    for post in parsed.get("posts", []) or []:
+        post_url = post.get("url") or ""
+        for c in post.get("comments", []) or []:
+            urn = c.get("urn")
+            if not urn:
+                continue
+            author = c.get("author_name") or c.get("author") or "?"
+            if me and me.lower() in author.lower():
+                continue  # don't reply to your own comments
+            items.append({"urn": urn, "author": author,
+                          "text": c.get("text") or "", "post_url": post_url})
+    return {"ok": True, "items": items}
 
 
 # ─── main ─────────────────────────────────────────────────────────────
@@ -807,7 +835,7 @@ def _queue_commenter_for_followup(commenter_field: str, *,
         pass
 
 
-def run_li(limit: int, seen: dict) -> int:
+def run_li(limit: int, seen: dict, live: bool = False) -> int:
     print("\n=== LinkedIn inbound ===")
     result = fetch_li_inbound(limit)
     if not result.get("ok"):
@@ -848,9 +876,39 @@ def run_li(limit: int, seen: dict) -> int:
             seen_li[urn] = {"ts": utcnow(), "status": "refused"}
             continue
         reply_text = result["draft"].strip()
+        if result.get("autofixes"):
+            print(f"         Autofixes: {result['autofixes']}")
         print(f"         Draft: {reply_text}")
-        print(f"         → To post manually: open the comment thread on LinkedIn, paste the draft, click Post.")
-        seen_li[urn] = {"ts": utcnow(), "status": "drafted"}
+        _metrics.log_event("drafted", platform="linkedin", mode="inbound",
+                           parent_url=urn, chars=len(reply_text),
+                           word_count=len(reply_text.split()),
+                           length_target=result.get("length_target"),
+                           autofixes=result.get("autofixes"))
+        if live:
+            # Live: enqueue to the outbox. outbox-flush submits via `lipy reply`.
+            try:
+                outbox_id = _outbox.enqueue(
+                    platform="linkedin", mode="inbound",
+                    parent_url=urn, draft_text=reply_text,
+                    metadata={
+                        "author": author,
+                        "comment_text": text[:500],
+                        "parent_post": post_url,
+                        "length_target": result.get("length_target"),
+                        "autofixes": result.get("autofixes") or [],
+                    },
+                )
+                print(f"         ✓ queued outbox id={outbox_id}")
+                seen_li[urn] = {"ts": utcnow(), "status": "queued",
+                                "outbox_id": outbox_id}
+            except Exception as e:
+                print(f"         FAIL queueing — {e}")
+                seen_li[urn] = {"ts": utcnow(), "status": "queue_failed",
+                                "reason": str(e)[:200]}
+                continue
+        else:
+            print(f"         → To post manually: open the thread on LinkedIn, paste the draft, click Post.")
+            seen_li[urn] = {"ts": utcnow(), "status": "drafted"}
         drafted += 1
     return drafted
 
@@ -894,7 +952,7 @@ def main() -> int:
             drafted += run_x(args.limit, args.source, args.max_age_days, seen,
                              live=args.live)
         if "linkedin" in platforms:
-            drafted += run_li(args.limit, seen)
+            drafted += run_li(args.limit, seen, live=args.live)
         save_seen(seen)
         return drafted
 

@@ -50,6 +50,7 @@ HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 LOCK_PATH = HERMES_HOME / "state" / "outbox-flush.lock"
 HEARTBEAT_PATH = HERMES_HOME / "state" / "heartbeat.json"
 START_CHROME_CDP = PROJECT_ROOT / "skills" / "x-engage" / "start-chrome-cdp.sh"
+LIPY_BIN = Path(os.environ.get("LIPY_BIN", Path.home() / ".local" / "bin" / "lipy"))
 
 COMPOSER_SELECTOR = 'div[data-testid="tweetTextarea_0"]'
 INLINE_SUBMIT_SELECTOR = 'button[data-testid="tweetButtonInline"]'
@@ -228,11 +229,50 @@ async def _dismiss_blockers(s) -> None:
         pass
 
 
+def _submit_one_li(parent_urn: str, text: str, *, mode: str, dry_run: bool, verbose: bool) -> dict:
+    """Submit a LinkedIn item via the lipy Playwright CLI (humanized typing/mouse
+    live inside lipy; no CDP). Inbound → `lipy reply --parent <comment-urn>`;
+    goodwill → `lipy comment --post <activity-urn>`. lipy has no like command yet,
+    so LinkedIn items aren't liked."""
+    if mode == "goodwill":
+        cmd = [str(LIPY_BIN), "comment", "--post", parent_urn, "--text", text]
+    else:  # inbound: reply to a specific comment
+        cmd = [str(LIPY_BIN), "reply", "--parent", parent_urn, "--text", text]
+    if not dry_run:
+        cmd.append("--live")
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
+    except subprocess.TimeoutExpired:
+        return {"ok": False, "error": "lipy_timeout"}
+    out = (p.stdout or "").strip()
+    parsed = None
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                parsed = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+    if verbose:
+        print(f"[flush:li] {out[-300:]}")
+    if dry_run:
+        return {"ok": True, "dry_run": True, "confirmation": "lipy_dry_run"}
+    if parsed and parsed.get("ok"):
+        return {"ok": True, "confirmation": "lipy_posted"}
+    return {"ok": False, "error": (parsed or {}).get("error") or "lipy_reply_failed",
+            "detail": (out or (p.stderr or ""))[:300]}
+
+
 async def _submit_one(item: dict, *, dry_run: bool, verbose: bool) -> dict:
-    """Submit one outbox item via the humanized CDP path.
-    Returns a result dict to be fed into mark_submitted/mark_failed."""
+    """Submit one outbox item. LinkedIn goes through lipy; X through the
+    humanized CDP path. Returns a result dict for mark_submitted/mark_failed."""
     parent_url = item["parent_url"]
     text = item["draft_text"]
+
+    if item.get("platform") == "linkedin":
+        return _submit_one_li(parent_url, text, mode=item.get("mode", "inbound"),
+                              dry_run=dry_run, verbose=verbose)
 
     async with open_session() as s:
         h = HumanCDP(s)

@@ -74,10 +74,15 @@ if [[ ! -f "$VOICE_PROFILE" ]]; then
 fi
 ok "voice profile present"
 
-if ! "$HOME/.local/bin/lipy" status 2>/dev/null | grep -q '"profile_present": true'; then
-  die "LinkedIn session not warmed. Run: lipy login --headed"
+# LinkedIn is OPTIONAL — a lapsed/absent session must not block X. If lipy is
+# warmed we arm the LinkedIn inbound cadence too; otherwise we skip it (X-only).
+LI_READY=0
+if "$HOME/.local/bin/lipy" status 2>/dev/null | grep -q '"profile_present": true'; then
+  LI_READY=1
+  ok "LinkedIn Playwright session warmed (LinkedIn inbound will be armed)"
+else
+  warn "LinkedIn session not warmed — arming X only. To enable LinkedIn: lipy login --headed, then re-run."
 fi
-ok "LinkedIn Playwright session warmed"
 
 if ! curl -s -m 2 http://localhost:9222/json/version >/dev/null 2>&1; then
   warn "CDP Chrome not running. Will need 'start-chrome-cdp' before cron ticks fire."
@@ -208,56 +213,48 @@ ok "daily-report: 23:55 every day"
 run "$HERMES_BIN cron add --name voice-retrain '0 2 * * 0' '$RETRAIN_PROMPT'"
 ok "voice-retrain: Sunday 02:00"
 
-# ─── 4b. Phase-2 X engagement orchestrators ───────────────────────────
+# ─── 4b. Phase-2 X engagement — human-rhythm cadence ──────────────────
 #
-# All times below are SGT (Asia/Singapore). The macmini's system TZ is SGT
-# despite BGE_TIMEZONE=America/Toronto in ~/.hermes/.env (verified via
-# `date` 2026-06-17). Hermes cron uses system local TZ.
-#
-# Goodwill fires 30 min before each SGT post (6/day every day):
-#   SGT 02:00 → T-30 = 01:30
-#   SGT 07:00 → T-30 = 06:30
-#   SGT 09:00 → T-30 = 08:30
-#   SGT 16:00 → T-30 = 15:30
-#   SGT 18:00 → T-30 = 17:30
-#   SGT 22:00 → T-30 = 21:30
-GOODWILL_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/feed-engagement.py --mode goodwill --max-visits 3 --max-reads 20 --live"
+# A SINGLE cadence-tick (every minute) decides when a human would actually act:
+# 1-2 bursty feed-goodwill sessions a day at jittered times, and inbound replies
+# that cluster after your posts get comments and then decay. This REPLACES the
+# old flat crons (goodwill ×6, inbound every 10m, commenter every 15m), which
+# were a robotic detection signal. Behavior knobs: config/cadence.yaml; session
+# hours come from config/windows.yaml. Inspect a day: cadence-tick.py --simulate.
+CADENCE_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/cadence-tick.py --platform x"
 
-INBOUND_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/inbound-engagement.py --platforms x --limit 5 --live"
-
-COMMENTER_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/engage-commenter.py --max-commenters 3 --max-per-commenter 1 --live"
+CADENCE_LI_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/cadence-tick.py --platform linkedin"
 
 FLUSH_PROMPT="Subprocess this exact command and return its stdout: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/outbox-flush.py --batch 1"
 
-# Clean removal of any prior X-engagement cron entries (both Toronto-style
-# names from the pre-fix run and the current SGT names).
+# Remove ALL prior engagement cron entries (flat-cron names from earlier runs)
+# so re-arming cleanly swaps to the cadence model.
 for J in \
     goodwill-0130 goodwill-0630 goodwill-0830 goodwill-1530 goodwill-1730 goodwill-2130 \
     goodwill-0330 goodwill-0530 goodwill-0930 goodwill-1330 goodwill-1830 goodwill-2030 \
-    inbound-monitor engage-commenter outbox-flush; do
+    inbound-monitor engage-commenter cadence-tick cadence-tick-li outbox-flush; do
   run "remove_by_name $J"
 done
 
-# Goodwill — 6 triggers, SGT (system local TZ).
-run "$HERMES_BIN cron add --name goodwill-0130 '30 1 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-0630 '30 6 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-0830 '30 8 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-1530 '30 15 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-1730 '30 17 * * *' '$GOODWILL_PROMPT'"
-run "$HERMES_BIN cron add --name goodwill-2130 '30 21 * * *' '$GOODWILL_PROMPT'"
-ok "goodwill: 6 triggers (SGT 01:30/06:30/08:30/15:30/17:30/21:30 = T-30 before SGT posts)"
+# Cadence (X) — one tick/minute; fires goodwill + inbound ONLY when a human would.
+run "$HERMES_BIN cron add --name cadence-tick '* * * * *' '$CADENCE_PROMPT'"
+ok "cadence-tick: every minute (X human-rhythm sessions + inbound decay)"
 
-# Inbound monitor — replies to comments on YOUR posts. Every 10 min.
-run "$HERMES_BIN cron add --name inbound-monitor '*/10 * * * *' '$INBOUND_PROMPT'"
-ok "inbound-monitor: every 10 min (drafts → outbox; 30-min hold buffer)"
-
-# Commenter follow-up — engage commenters on their own posts. Every 15 min.
-run "$HERMES_BIN cron add --name engage-commenter '*/15 * * * *' '$COMMENTER_PROMPT'"
-ok "engage-commenter: every 15 min (pops commenter_queue.jsonl)"
+# Cadence (LinkedIn) — inbound replies only (no LinkedIn goodwill/feed path yet).
+# Armed only if lipy is logged in.
+if [[ "${LI_READY:-0}" == "1" ]]; then
+  run "$HERMES_BIN cron add --name cadence-tick-li '* * * * *' '$CADENCE_LI_PROMPT'"
+  ok "cadence-tick-li: every minute (LinkedIn inbound replies, human decay)"
+else
+  warn "cadence-tick-li: SKIPPED (LinkedIn not warmed — lipy login --headed, then re-run)"
+fi
 
 # Outbox flush — submits + likes matured drafts. Every 2 min.
 run "$HERMES_BIN cron add --name outbox-flush '*/2 * * * *' '$FLUSH_PROMPT'"
 ok "outbox-flush: every 2 min (humanly submits + likes from outbox)"
+
+# NOTE: engage-commenter (engaging your commenters' own audiences) is no longer
+# auto-scheduled — it can be folded into the cadence later if you want it back.
 
 # ─── 5. Summary ─────────────────────────────────────────────────
 cat <<EOF

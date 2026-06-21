@@ -785,6 +785,81 @@ def cmd_posts(args: argparse.Namespace) -> int:
     return 0
 
 
+def _scrape_feed(page, limit: int) -> list[dict]:
+    """Scroll the LinkedIn HOME feed and harvest posts from OTHERS to engage with.
+    Returns up to `limit` items: [{urn, url, author, text}]. Skips promoted posts
+    and empty bodies. Mirrors _scrape_posts but on /feed/ and pulls the author."""
+    page.goto("https://www.linkedin.com/feed/",
+              wait_until="domcontentloaded", timeout=30_000)
+    try:
+        page.wait_for_selector("main", timeout=15_000)
+    except Exception:
+        pass
+    _jitter(2.0, 3.5)
+
+    seen: set[str] = set()
+    posts: list[dict] = []
+    for _ in range(15):
+        cards = page.query_selector_all(
+            '[data-urn^="urn:li:activity:"], [data-id^="urn:li:activity:"]'
+        )
+        for card in cards:
+            urn = card.get_attribute("data-urn") or card.get_attribute("data-id")
+            if not urn or urn in seen:
+                continue
+            seen.add(urn)
+            try:
+                chrome_txt = card.inner_text()
+            except Exception:
+                chrome_txt = ""
+            if re.search(r"\bPromoted\b|\bSponsored\b", chrome_txt, re.I):
+                continue  # skip ads
+            author = ""
+            a_el = (
+                card.query_selector('.update-components-actor__title span[aria-hidden="true"]')
+                or card.query_selector('.update-components-actor__name span[aria-hidden="true"]')
+                or card.query_selector('.update-components-actor__title')
+                or card.query_selector('.update-components-actor__name')
+            )
+            if a_el:
+                try:
+                    author = re.sub(r"\s+", " ", a_el.inner_text()).strip()[:120]
+                except Exception:
+                    author = ""
+            body = ""
+            body_el = (
+                card.query_selector('.update-components-text')
+                or card.query_selector('.feed-shared-update-v2__description')
+                or card.query_selector('[componentkey^="feed-commentary_"]')
+            )
+            if body_el:
+                try:
+                    body = re.sub(r"\s+", " ", body_el.inner_text()).strip()[:1500]
+                except Exception:
+                    body = ""
+            if not body:
+                continue  # nothing to engage with
+            _remember_urn(activity_urn=urn, ugc_urn=None, post_text=body)
+            posts.append({"urn": urn,
+                          "url": f"https://www.linkedin.com/feed/update/{urn}/",
+                          "author": author, "text": body})
+            if len(posts) >= limit:
+                return posts
+        page.mouse.wheel(0, 3000)
+        _jitter(2.0, 4.0)
+    return posts
+
+
+def cmd_feed(args: argparse.Namespace) -> int:
+    with linkedin_session(headed=args.headed) as (_b, _c, page):
+        ok, reason, _ = _check_auth(page)
+        if not ok:
+            return _err(reason)
+        posts = _scrape_feed(page, args.limit)
+    json.dump({"ok": True, "count": len(posts), "posts": posts}, sys.stdout)
+    return 0
+
+
 def _scrape_comments(page, post_urn: str, max_load_clicks: int = 10) -> list[dict]:
     """Open a single post and harvest comments.
     Uses JS scrollIntoView to trigger LazyColumn rendering. Returns
@@ -1796,6 +1871,12 @@ def main() -> int:
     inbound.add_argument("--limit", type=int, default=5)
     inbound.add_argument("--headed", action="store_true")
     inbound.set_defaults(fn=cmd_inbound)
+
+    feed = sp.add_parser("feed",
+        help="Scrape the home feed for others' posts to goodwill-comment on.")
+    feed.add_argument("--limit", type=int, default=10)
+    feed.add_argument("--headed", action="store_true")
+    feed.set_defaults(fn=cmd_feed)
 
     session = sp.add_parser("session",
         help="Open a long-running Chromium window. Other lipy commands attach to it via CDP.")

@@ -1,0 +1,40 @@
+# Human-rhythm cadence. Replaces flat-interval polling with realistic sessions.
+#
+# This layer decides WHEN to act so the loop behaves like a person — one or two
+# bursty sessions a day for feed goodwill, and replies that cluster right after
+# your posts get comments and then decay — instead of a robotic every-N-minutes
+# poll. Caps/windows/jitter/hold-buffer still apply on top as hard safety bounds.
+#
+# All ranges are {min, max} inclusive; the engine draws a value per day/session
+# from a per-machine seed, so the rhythm is stable within a day but varies
+# day-to-day and differs across machines. Times are minutes unless noted.
+
+x:
+  outbound:                          # goodwill comments on the home feed
+    sessions_per_day: {min: 1, max: 2}
+    session_minutes:  {min: 25, max: 60}
+    daily_actions:    {min: 3, max: 8}     # comments drafted per day across sessions
+    gap_minutes:      {min: 5, max: 15}    # human gap between browse/comment fires
+    skip_day_prob:    0.15                 # some days you just don't show up
+  inbound:                           # replies to comments on your posts
+    fresh_window_hours: 2                  # "dense" checking after fresh comment activity
+    dense_minutes:    {min: 12, max: 25}
+    taper_window_hours: 10                 # after fresh, taper for this long
+    taper_minutes:    {min: 45, max: 90}
+    quiet_minutes:    {min: 150, max: 240} # background glance when it's quiet
+    daily_actions:    {min: 0, max: 12}
+
+linkedin:                           # lighter — higher restriction risk
+  outbound:
+    sessions_per_day: {min: 1, max: 1}
+    session_minutes:  {min: 20, max: 45}
+    daily_actions:    {min: 1, max: 4}
+    gap_minutes:      {min: 8, max: 20}
+    skip_day_prob:    0.25
+  inbound:
+    fresh_window_hours: 2
+    dense_minutes:    {min: 15, max: 30}
+    taper_window_hours: 8
+    taper_minutes:    {min: 60, max: 120}
+    quiet_minutes:    {min: 180, max: 300}
+    daily_actions:    {min: 0, max: 8}
