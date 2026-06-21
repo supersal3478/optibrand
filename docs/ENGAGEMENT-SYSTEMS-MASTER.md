@@ -12,13 +12,14 @@ mini (the always-on machine); this desktop is for editing/review.
 > `macmini-live` (through the LinkedIn goodwill build). After a `git pull` on the
 > Mac mini, re-run `./scripts/autonomy-mode.sh` to pick up the cadence crons.
 >
-> **2026-06-21 session update — LinkedIn goodwill is now UNBLOCKED.** `lipy feed`
-> returns real home-feed posts (headed); LinkedIn outbound goodwill is wired into
-> `cadence-tick`; `lipy like` exists and `outbox-flush` likes after every LinkedIn
-> submit; the flaky inbound comment-scrape and reply/comment nav are hardened. The
-> one remaining gap is goodwill *draft quality* on low-value/promo posts (needs a
-> stricter judge) — see §8.1-note. Nothing posts to a real person without explicit
-> per-post approval.
+> **2026-06-21 session update — LinkedIn goodwill is now UNBLOCKED + quality-gated.**
+> `lipy feed` returns real home-feed posts (headed); LinkedIn outbound goodwill is
+> wired into `cadence-tick`; `lipy like` exists and `outbox-flush` likes after every
+> LinkedIn submit; the flaky inbound comment-scrape and reply/comment nav are
+> hardened; and goodwill now runs a **quality judge** (skip promo/low-value/off-brand)
+> + a proper outbound **goodwill drafter** before enqueueing (§8.1-note). The whole
+> chain is dry-run-proven. What's left is a supervised LIVE goodwill comment+like —
+> nothing posts to a real person without explicit per-post approval.
 
 ---
 
@@ -168,7 +169,7 @@ Legend: ✅ built+tested · 🟡 built, partially tested · 🔴 built but block
 | `lipy feed` **(NEW)** | Scrape home feed for posts to goodwill-comment on. | ✅ **returns posts** — headed + per-card scrollIntoView; URN from inline-comment keys or the control-menu Embed/Report href; author from the control-menu aria-label (§8.1) |
 | `lipy like` **(NEW)** | Like/react to a post (human-emulated). Default `--dry-run`; idempotent. | ✅ dry-run proven; live like pending per-post approval |
 | `skills/linkedin-engage/human_actions.py` | LinkedIn humanization. | ✅ |
-| `scripts/li-feed-engagement.py` **(NEW)** | LinkedIn goodwill orchestrator: `lipy feed` → judge/draft → enqueue (mode=goodwill). Reuses `draft_reply`. | ✅ end-to-end dry-run proven (blocklist bug fixed). Draft *quality* on promo posts still weak (§8.1-note) |
+| `scripts/li-feed-engagement.py` **(NEW)** | LinkedIn goodwill orchestrator: `lipy feed` → **`judge_goodwill_post`** (quality gate) → **`draft_goodwill`** (outbound framing) → enqueue (mode=goodwill). | ✅ end-to-end dry-run proven; judge skips promo/off-brand, drafts additive on-topic (§8.1-note). Blocklist bug fixed. |
 
 ### 5.4 Orchestration / ops
 | File | Role | Status |
@@ -211,15 +212,15 @@ Legend: ✅ built+tested · 🟡 built, partially tested · 🔴 built but block
 - **Reply/comment nav fragility** — ✅ §8.3. Direct-URL permalink is now primary
   (feed pre-context for referer); the flaky click-through is deprecated.
 
+- **Goodwill DRAFT QUALITY** — ✅ DONE (§8.1-note). `li-feed-engagement` now runs
+  `judge_goodwill_post` (fail-closed; skips promo/low-value/off-brand) before
+  `draft_goodwill` (outbound additive framing). Dry-run proven: motivational post →
+  judge NO (skipped); software/AI post → judge YES → additive draft.
+
 ### Remaining / not working
-- **Goodwill DRAFT QUALITY on low-value/promo posts** — 🟡 NEW top priority. The
-  feed plumbing works, but `draft_reply` (reused from inbound) drafted a dismissive
-  "No thanks, I'll pass" on a spammy promo post. Goodwill on strangers needs a
-  stricter pre-draft judge (skip promo/low-quality/off-brand; only engage
-  positively). See §8.1-note. **Do not enable LinkedIn goodwill live posting until
-  this is addressed.**
 - **Live goodwill comment + live like** — untested end-to-end (outward → needs
-  per-post approval). The submit + like code paths are in place.
+  per-post approval). Discovery → judge → draft → outbox → submit + like are all in
+  place and dry-run-proven; only the final supervised live post is pending.
 - **LinkedIn `engage-commenter`** — ⬜ X-only.
 
 ---
@@ -249,15 +250,16 @@ Legend: ✅ built+tested · 🟡 built, partially tested · 🔴 built but block
   end-to-end. Also fixed a blocklist bug (`_blocked_terms` iterated the `handles`
   dict → "x" as a substring blocked nearly every post).
 
-> **§8.1-note — NEW top priority: goodwill draft quality.** The discovery+plumbing
-> is done, but the *content judge* isn't goodwill-grade. On a spammy "Use AI To
-> Start A BILLION DOLLAR business" promo, `draft_reply` (reused from the inbound
-> path) returned a dismissive `"No thanks, I'll pass"` as the comment. For
-> outbound goodwill on strangers we need a stricter pre-draft gate: skip promo /
-> low-value / off-brand posts entirely, and only ever draft a *positive,
-> additive* comment. Build this (likely a relevance/quality judge in
-> `li-feed-engagement` before `draft_reply`, or a goodwill-specific drafter
-> prompt) **before** flipping LinkedIn goodwill to live posting.
+> **§8.1-note — goodwill draft quality: ✅ DONE 2026-06-21.** Originally the reused
+> inbound `draft_reply` produced a dismissive `"No thanks, I'll pass"` on a spammy
+> promo. Fixed in `li-feed-engagement.py`: each post is now gated by
+> `judge_goodwill_post` (LLM, **fail-closed** → 'no' on any error; requires
+> `decision=yes` AND `confidence ≥ JUDGE_MIN_CONFIDENCE` (0.55)) which skips
+> promo / lead-magnets / engagement-bait / low-value / off-brand, and is permissive
+> on substantive tech/AI/operator posts. Only yes-verdicts reach `draft_goodwill`,
+> an outbound "add a concrete point, don't just agree" drafter (vs the inbound
+> framing). Skips log `skipped_judge`. Tune the bar via `JUDGE_MIN_CONFIDENCE` and
+> the judge's NO-list. Mirrors X's `judge_audience_alignment` + `draft_goodwill_comment`.
 
 **Original problem (for reference; confirmed via DOM probes 2026-06-21):** `lipy
 feed` navigated to `linkedin.com/feed/` and found **zero** post cards in
