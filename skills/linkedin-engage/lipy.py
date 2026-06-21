@@ -547,6 +547,10 @@ def navigate_to_own_post(
     """Mimic a human: open the activity page, scroll until the target post is
     visible, then click into it. Returns True on success.
 
+    DEPRECATED / currently unused: cmd_reply and cmd_comment now navigate direct
+    to the post permalink (the click-through proved flaky and can't reach
+    strangers' posts at all). Kept for reference / a possible future revisit.
+
     Matching strategy (the activity page card carries `urn:li:activity:X` on its
     data-urn, but the same post is also referenced as `urn:li:ugcPost:Y` inside
     the card's HTML — comments are keyed by ugcPost while cards are keyed by
@@ -974,16 +978,36 @@ def _scrape_comments(page, post_urn: str, max_load_clicks: int = 10) -> list[dic
     _jitter(2.0, 3.5)
 
     # Force the LazyColumn for comments to render by scrolling it into view.
-    triggered = page.evaluate("""() => {
-        const sel = '[componentkey*="commentsSectionAnchor"], '
-                  + '[componentkey*="pagedCommentsContainer"], '
-                  + '[data-testid*="commentsSectionAnchor"], '
-                  + '[data-testid*="pagedCommentsContainer"]';
-        const el = document.querySelector(sel);
-        if (el) { el.scrollIntoView({behavior: 'instant', block: 'center'}); return true; }
-        return false;
-    }""")
-    _jitter(3.0, 4.5)
+    # This is FLAKY — the section hydrates lazily and a single scroll often
+    # leaves it empty. Retry the scroll-into-view, with a growing dwell and a
+    # wheel nudge between tries, until at least one comment wrapper appears.
+    def _comments_rendered() -> bool:
+        try:
+            return bool(page.query_selector(
+                '[componentkey^="replaceableComment_urn:li:comment:"]'))
+        except Exception:
+            return False
+
+    triggered = False
+    for attempt in range(4):
+        triggered = page.evaluate("""() => {
+            const sel = '[componentkey*="commentsSectionAnchor"], '
+                      + '[componentkey*="pagedCommentsContainer"], '
+                      + '[data-testid*="commentsSectionAnchor"], '
+                      + '[data-testid*="pagedCommentsContainer"]';
+            const el = document.querySelector(sel);
+            if (el) { el.scrollIntoView({behavior: 'instant', block: 'center'}); return true; }
+            return false;
+        }""")
+        _jitter(2.5 + attempt, 4.0 + attempt)  # growing hydration dwell
+        if _comments_rendered():
+            break
+        # Nudge the virtualized list, then retry the anchor scroll.
+        try:
+            page.mouse.wheel(0, 700)
+        except Exception:
+            pass
+        _jitter(0.8, 1.6)
 
     # Click any load-more / show-previous buttons (idempotent loop).
     for _ in range(max_load_clicks):
@@ -1250,15 +1274,14 @@ def cmd_comment(args: argparse.Namespace) -> int:
         except Exception:
             pass  # not critical
 
-        # NAVIGATE BY CLICKING when possible: go to own activity page, find the
-        # post, click it. Fall back to direct URL only if click-through fails.
+        # Navigate DIRECT to the post permalink. Goodwill targets STRANGERS'
+        # posts, which never appear on the user's own activity page, so the
+        # click-through path can't work here — go straight to the URL (the feed
+        # pre-context above gives referer realism).
         if not _on_post_detail(page, args.post):
-            navigated = navigate_to_own_post(page, args.post)
-            if not navigated:
-                sys.stderr.write("[warn] click-through nav failed; falling back to direct URL\n")
-                page.goto(f"https://www.linkedin.com/feed/update/{args.post}/",
-                          wait_until="domcontentloaded", timeout=30_000)
-                ha.dwell(1.5, 3.0)
+            page.goto(f"https://www.linkedin.com/feed/update/{args.post}/",
+                      wait_until="domcontentloaded", timeout=30_000)
+            ha.dwell(1.5, 3.0)
 
         # Read the post.
         body_el = page.query_selector('[componentkey^="feed-commentary_"]')
@@ -1442,28 +1465,27 @@ def cmd_reply(args: argparse.Namespace) -> int:
         if not ok:
             return _err(reason)
 
-        # Resolve the activity URN + post text via the cache so we can navigate-by-click.
+        # Resolve the activity URN via the cache — it's the cleaner permalink.
         cached = _lookup_by_ugc(post_ugc_urn)
         cache_activity_urn = (cached or {}).get("activity_urn")
-        cache_text_hint = (cached or {}).get("post_text")
-        # Caller-supplied hint wins over cache.
-        text_hint = args.post_hint or cache_text_hint
 
+        # Navigate DIRECT to the post permalink. The click-through path (open own
+        # activity page, find & click the card) proved flaky in live runs and
+        # spuriously failed, so the direct URL is now the primary path — but we
+        # come from the feed first so it isn't a cold teleport (referer realism).
         if not _on_post_detail(page, post_ugc_urn):
-            navigated = False
-            # Try the activity URN from cache first (best match for the activity page).
-            if cache_activity_urn and navigate_to_own_post(page, cache_activity_urn,
-                                                          text_hint=text_hint):
-                navigated = True
-            # Fall back to ugcPost URN (may match via outerHTML/text/hint).
-            if not navigated and navigate_to_own_post(page, post_ugc_urn,
-                                                     text_hint=text_hint):
-                navigated = True
-            if not navigated:
-                sys.stderr.write("[warn] click-through nav failed; falling back to direct URL\n")
-                page.goto(f"https://www.linkedin.com/feed/update/{post_ugc_urn}/",
-                          wait_until="domcontentloaded", timeout=30_000)
-                ha.dwell(1.5, 3.0)
+            try:
+                page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded",
+                          timeout=20_000)
+                ha.dwell(1.0, 2.2)
+                ha.smooth_scroll(page, 800)
+                ha.dwell(0.5, 1.1)
+            except Exception:
+                pass  # pre-context is nice-to-have, not required
+            target_urn = cache_activity_urn or post_ugc_urn
+            page.goto(f"https://www.linkedin.com/feed/update/{target_urn}/",
+                      wait_until="domcontentloaded", timeout=30_000)
+            ha.dwell(1.5, 3.0)
         ha.smooth_scroll(page, 500)
 
         # Force comment area to render + expand all.
