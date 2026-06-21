@@ -8,11 +8,17 @@ engineer or AI can continue the build without re-deriving context.
 **Last updated:** 2026-06-21. **Branch:** `macmini-live`. **Runs on:** the Mac
 mini (the always-on machine); this desktop is for editing/review.
 
-> **Commit status note.** As of this writing: the X cadence system and the
-> LinkedIn inbound + goodwill-scaffolding are **uncommitted** on the editing
-> desktop (everything earlier — install hardening, model policy, start.sh,
-> activity-report, stability fixes — is committed on `macmini-live`). Commit +
-> push before relying on it from the Mac mini.
+> **Commit status note.** Everything described here is committed + pushed on
+> `macmini-live` (through the LinkedIn goodwill build). After a `git pull` on the
+> Mac mini, re-run `./scripts/autonomy-mode.sh` to pick up the cadence crons.
+>
+> **2026-06-21 session update — LinkedIn goodwill is now UNBLOCKED.** `lipy feed`
+> returns real home-feed posts (headed); LinkedIn outbound goodwill is wired into
+> `cadence-tick`; `lipy like` exists and `outbox-flush` likes after every LinkedIn
+> submit; the flaky inbound comment-scrape and reply/comment nav are hardened. The
+> one remaining gap is goodwill *draft quality* on low-value/promo posts (needs a
+> stricter judge) — see §8.1-note. Nothing posts to a real person without explicit
+> per-post approval.
 
 ---
 
@@ -135,8 +141,8 @@ Legend: ✅ built+tested · 🟡 built, partially tested · 🔴 built but block
 | `scripts/_metrics.py` | Append-only event log (`~/.hermes/logs/engagement_metrics.jsonl`) + today counters. Events: drafted, queued_outbox, submitted, liked, vetoed_brandguard, skipped_*, cadence_fire, session_logged_out, etc. | ✅ |
 | `scripts/_drafter.py` | Length-target distribution + punctuation/length autofixes. | ✅ |
 | `scripts/_cadence.py` | **NEW.** Human-rhythm engine: deterministic daily plan (per-machine salt), `should_act_outbound`, `inbound_due` (decay), `describe_day`. Pure logic; state from metrics. | ✅ (simulate + dry-run verified) |
-| `scripts/cadence-tick.py` | **NEW.** One-cron driver (every minute). Fires one goodwill + one inbound action when a human would. `--simulate`, `--dry-run`. X does outbound+inbound; LinkedIn inbound-only. | ✅ X · 🟡 LinkedIn (inbound only) |
-| `scripts/outbox-flush.py` | Drains mature outbox items, re-checks kill-switches, submits. X via CDP+`x_human` (+like every reply); LinkedIn via `_submit_one_li` → `lipy reply` (inbound) / `lipy comment` (goodwill). Writes `heartbeat.json`. | ✅ X · ✅ LI inbound (live-proven) · 🟡 LI goodwill (submit path coded, depends on feed) |
+| `scripts/cadence-tick.py` | **NEW.** One-cron driver (every minute). Fires one goodwill + one inbound action when a human would. `--simulate`, `--dry-run`. X **and** LinkedIn now do outbound+inbound (per-platform OUTBOUND command map). | ✅ X · ✅ LinkedIn (outbound + inbound) |
+| `scripts/outbox-flush.py` | Drains mature outbox items, re-checks kill-switches, submits. X via CDP+`x_human` (+like every reply); LinkedIn via `_submit_one_li` → `lipy reply` (inbound) / `lipy comment` (goodwill), **+`lipy like` after every LI submit** (`_like_li_post`, non-fatal). Writes `heartbeat.json`. | ✅ X · ✅ LI inbound (live-proven) · ✅ LI goodwill submit path (feed unblocked; live post pending approval) |
 | `scripts/activity-report.py` | Ledger + daily summary + liveness/heartbeat, from outbox+metrics. `--date/--days/--csv/--save`. | ✅ |
 
 ### 5.2 X engagement (CDP) — all built & working
@@ -158,10 +164,11 @@ Legend: ✅ built+tested · 🟡 built, partially tested · 🔴 built but block
 | `skills/linkedin-engage/lipy.py` | The LinkedIn driver. Commands: `login`, `doctor`, `status`, `session`, `posts`, `comments`, `comment`, `reply`, `publish`, `my-comments`, **`feed` (NEW)**. | mixed (below) |
 | `lipy reply --parent <comment-urn> --text … --live` | Reply to a comment. | ✅ **live-proven** (posted to a real comment) |
 | `lipy comment --post <activity-urn> --text … --live` | Top-level comment on a post (= goodwill submit). | ✅ (primitive exists; used by goodwill) |
-| `lipy posts` / `lipy inbound` | Read your posts / comments on them. | ✅ reads work; 🟡 inbound comment-scrape is **flaky** (LazyColumn render) |
-| `lipy feed` **(NEW)** | Scrape home feed for posts to goodwill-comment on. | 🔴 **returns 0** — home feed is gated against headless scraping (see §7) |
+| `lipy posts` / `lipy inbound` | Read your posts / comments on them. | ✅ reads work; ✅ comment-scrape **hardened** (retry the LazyColumn scroll up to 4× w/ growing dwell + wheel nudge) |
+| `lipy feed` **(NEW)** | Scrape home feed for posts to goodwill-comment on. | ✅ **returns posts** — headed + per-card scrollIntoView; URN from inline-comment keys or the control-menu Embed/Report href; author from the control-menu aria-label (§8.1) |
+| `lipy like` **(NEW)** | Like/react to a post (human-emulated). Default `--dry-run`; idempotent. | ✅ dry-run proven; live like pending per-post approval |
 | `skills/linkedin-engage/human_actions.py` | LinkedIn humanization. | ✅ |
-| `scripts/li-feed-engagement.py` **(NEW)** | LinkedIn goodwill orchestrator: `lipy feed` → judge/draft → enqueue (mode=goodwill). Reuses `draft_reply`. | 🔴 inert until `lipy feed` works |
+| `scripts/li-feed-engagement.py` **(NEW)** | LinkedIn goodwill orchestrator: `lipy feed` → judge/draft → enqueue (mode=goodwill). Reuses `draft_reply`. | ✅ end-to-end dry-run proven (blocklist bug fixed). Draft *quality* on promo posts still weak (§8.1-note) |
 
 ### 5.4 Orchestration / ops
 | File | Role | Status |
@@ -192,20 +199,69 @@ Legend: ✅ built+tested · 🟡 built, partially tested · 🔴 built but block
 - **X posting + heartbeat:** earlier in the session — humanized typing lands text; heartbeat writes logged-in state. ✅
 - **LinkedIn inbound — full chain, LIVE:** `lipy` repaired → read a real comment → drafted in voice → enqueued correctly (`platform=linkedin`, `parent_url`=comment URN) → **`lipy reply --live` posted a real reply** to John H. Lee's comment. ✅
 
+### Done this session (2026-06-21)
+- **LinkedIn goodwill feed discovery (`lipy feed`)** — ✅ unblocked. Returns real
+  posts headed (urn+author+text); `li-feed-engagement` dry-run drafts end-to-end.
+- **LinkedIn outbound wired into cadence** — ✅ §8.4. `cadence-tick --platform linkedin`
+  now fires `li-feed-engagement` on the human-rhythm engine.
+- **LinkedIn liking** — ✅ §8.2. `lipy like` added; `outbox-flush` likes after every
+  LI submit. Dry-run proven; live like pending approval.
+- **Inbound comment-scrape flakiness** — ✅ §8.3. `_scrape_comments` retries the
+  LazyColumn hydration; `lipy inbound --limit 3` now reliably returns threads.
+- **Reply/comment nav fragility** — ✅ §8.3. Direct-URL permalink is now primary
+  (feed pre-context for referer); the flaky click-through is deprecated.
+
 ### Remaining / not working
-- **LinkedIn goodwill feed discovery (`lipy feed`)** — 🔴 blocked. See §8.1.
-- **LinkedIn inbound comment-scrape flakiness** — 🟡 the LazyColumn render is hit-or-miss (`--limit 1` often empty; `--limit 3` caught comments). Needs hardening (§8.3).
-- **LinkedIn liking** — ⬜ no `lipy like` command (§8.2).
+- **Goodwill DRAFT QUALITY on low-value/promo posts** — 🟡 NEW top priority. The
+  feed plumbing works, but `draft_reply` (reused from inbound) drafted a dismissive
+  "No thanks, I'll pass" on a spammy promo post. Goodwill on strangers needs a
+  stricter pre-draft judge (skip promo/low-quality/off-brand; only engage
+  positively). See §8.1-note. **Do not enable LinkedIn goodwill live posting until
+  this is addressed.**
+- **Live goodwill comment + live like** — untested end-to-end (outward → needs
+  per-post approval). The submit + like code paths are in place.
 - **LinkedIn `engage-commenter`** — ⬜ X-only.
-- The supervised live reply showed nav fallback warnings (click-through failed → direct-URL nav) — works but fragile (§8.3).
 
 ---
 
 ## 8. REMAINING BUILD — continuation guide for the next engineer/AI
 
-### 8.1 LinkedIn goodwill feed scraper (the big one) — 🔴 BLOCKED
-**Problem (confirmed via DOM probes 2026-06-21):** `lipy feed` navigates to
-`linkedin.com/feed/` and finds **zero** post cards in **headless** mode.
+### 8.1 LinkedIn goodwill feed scraper (the big one) — ✅ RESOLVED 2026-06-21
+**How it was solved** (`_scrape_feed` in `lipy.py`):
+- Run **headed** (`lipy feed` now defaults to `--headed`; `--headless` to override).
+  The home feed only renders to a non-headless session.
+- The feed is the virtualized container
+  `[componentkey="container-update-list_mainFeed-lazy-container"]`; its **direct
+  children are the post cards**. Off-screen cards are *dehydrated*, so walk cards
+  and `scrollIntoView({block:'center'})` **each** one, waiting ~1–1.8s, before
+  reading it.
+- **Author** comes from the control-menu button's `aria-label` — `"Open control
+  menu for post by <Author>"` (EN) / `"Buka menu kawalan untuk paparan oleh
+  <Author>"` (MS). Present on every real card, language-agnostic.
+- **Body**: `[componentkey^="feed-commentary_"]` or `[data-testid="expandable-text-box"]`
+  (the old `.update-components-*` BEM classes are gone).
+- **URN** is *not* on the wrapper. Cheap path: regex `urn:li:(activity|ugcPost):\d+`
+  over the card HTML (present when the card has inline comments / fired tracking).
+  Authoritative fallback: open the **control menu** and read the **Embed/Report**
+  item href (`?targetUrn=` / `?entityUrn=urn:li:share:…`), language-agnostic.
+- **Promoted** filter: EN+MS — `Promoted|Sponsored|Dipromosikan|Ditaja`.
+- Proven: `lipy feed --limit 4` returns 4 posts; `li-feed-engagement` dry-run drafts
+  end-to-end. Also fixed a blocklist bug (`_blocked_terms` iterated the `handles`
+  dict → "x" as a substring blocked nearly every post).
+
+> **§8.1-note — NEW top priority: goodwill draft quality.** The discovery+plumbing
+> is done, but the *content judge* isn't goodwill-grade. On a spammy "Use AI To
+> Start A BILLION DOLLAR business" promo, `draft_reply` (reused from the inbound
+> path) returned a dismissive `"No thanks, I'll pass"` as the comment. For
+> outbound goodwill on strangers we need a stricter pre-draft gate: skip promo /
+> low-value / off-brand posts entirely, and only ever draft a *positive,
+> additive* comment. Build this (likely a relevance/quality judge in
+> `li-feed-engagement` before `draft_reply`, or a goodwill-specific drafter
+> prompt) **before** flipping LinkedIn goodwill to live posting.
+
+**Original problem (for reference; confirmed via DOM probes 2026-06-21):** `lipy
+feed` navigated to `linkedin.com/feed/` and found **zero** post cards in
+**headless** mode.
 Findings:
 - The page loads (URL/title correct) but renders only the sidebar; the feed is a
   **lazy/virtualized container**: `[componentkey="container-update-list_mainFeed-lazy-container"]`.
@@ -252,28 +308,34 @@ submits goodwill via `lipy comment --post`, and you just flip on LinkedIn
 outbound in `cadence-tick.py` (currently it `skip`s outbound for non-X — search
 `"no goodwill/feed path for"`).
 
-### 8.2 LinkedIn liking — ⬜ NOT BUILT
-There is **no `lipy like`** command. To match X (every reply gets a like):
-add `cmd_like(post_or_comment_urn)` to `lipy.py` (navigate, find the Like button
-— attribute/aria-based, language-independent since UI may be Malay — human-click
-via `human_actions`), register a `like` subparser, then in
-`outbox-flush._submit_one_li` call it after a successful submit (mirror the X
-`_like_focal_post`). Verify by the button's state flip.
+### 8.2 LinkedIn liking — ✅ BUILT 2026-06-21
+`lipy like --post <urn>` (`cmd_like`): feed pre-context → direct nav → human-click
+the reaction toggle → verify the state flip. Button found language-independently
+(`_find_like_button`: aria-label has `reaction`/`reaksi`, not the `…menu` trigger;
+first match = post action bar). Default `--dry-run`; idempotent (`_reaction_is_set`
+checks "no reaction"/"tiada"). `outbox-flush._submit_one_li` calls `_like_li_post`
+after every successful LI submit (goodwill → the post; inbound → parent post from
+the comment URN), non-fatal, mirroring X. Dry-run proven; live like pending approval.
 
-### 8.3 LinkedIn read reliability — 🟡 HARDEN
-- **Inbound comment-scrape is flaky** (LazyColumn). In `lipy.py` `_scrape_comments`,
-  increase the scroll-into-view dwell, retry the render, and scan more posts by
-  default. `fetch_li_inbound` already flattens `posts→comments`; bump its default
-  scan breadth.
-- **Reply navigation fragility:** the live reply logged "click-through nav
-  failed; falling back to direct URL". The direct-URL fallback works; make it the
-  primary path for replies to avoid the flaky click-through.
+### 8.3 LinkedIn read reliability — ✅ HARDENED 2026-06-21
+- **Inbound comment-scrape:** `_scrape_comments` now retries the comments-anchor
+  `scrollIntoView` up to 4× with a growing dwell + wheel nudge, breaking as soon
+  as a `replaceableComment_` wrapper renders. `lipy inbound --limit 3` reliably
+  returns threads now (was hit-or-miss).
+- **Reply/comment nav:** direct-to-permalink is now the **primary** path (feed
+  pre-context for referer realism); the flaky click-through (`navigate_to_own_post`)
+  is deprecated/unused. cmd_comment also goes direct (goodwill targets strangers'
+  posts, which never appear on the own-activity page).
 
-### 8.4 Cadence for LinkedIn outbound — ⬜ (1-line flip, after 8.1)
-`cadence-tick.py` only fires outbound for `platform == "x"`. Once `lipy feed`
-works, add a `linkedin` branch that fires `li-feed-engagement.py --live --max-comments 1`,
-and make `_cadence.should_act_outbound` usable for LinkedIn (it already is —
-reads `cadence.yaml: linkedin.outbound`).
+### 8.4 Cadence for LinkedIn outbound — ✅ WIRED 2026-06-21
+`cadence-tick.py` now drives outbound via a per-platform `OUTBOUND` command map:
+`x`→`feed-engagement.py`, `linkedin`→`li-feed-engagement.py --max-comments 1
+--limit 5 --live` (600s timeout). `_cadence.should_act_outbound` reads
+`cadence.yaml: linkedin.outbound`. The `cadence-tick-li` cron (autonomy-mode.sh)
+already passes `--platform linkedin`. Firing only DRAFTS into the outbox;
+`outbox-flush` posts later under caps + per-post approval. **Note:** with §8.1-note
+unresolved, goodwill draft quality is weak — keep `linkedin.live: false` (or rely
+on the hold-buffer + per-post approval) until the goodwill judge is built.
 
 ### 8.5 Lower-priority deferred items
 - `outbox-flush` stale-lock window (15 min) — make PID-aware to remove a tiny
