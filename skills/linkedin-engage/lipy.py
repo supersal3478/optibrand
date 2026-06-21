@@ -1330,6 +1330,98 @@ def cmd_comment(args: argparse.Namespace) -> int:
         return 0
 
 
+def _find_like_button(page):
+    """The post's reaction TOGGLE button. Language-independent: a visible button
+    whose aria-label references a reaction (EN 'Reaction button state…' / MS
+    'reaksi') but is NOT the hover 'Open reactions menu' / 'Buka menu reaksi'
+    trigger. First match in document order = the post action bar (above comments).
+    Returns an ElementHandle or None."""
+    try:
+        buttons = page.query_selector_all('button[aria-label]')
+    except Exception:
+        return None
+    for b in buttons:
+        al = (b.get_attribute("aria-label") or "").lower()
+        if ("reaction" in al or "reaksi" in al) and "menu" not in al:
+            try:
+                if b.is_visible():
+                    return b
+            except Exception:
+                continue
+    return None
+
+
+def _reaction_is_set(aria_label: str) -> bool:
+    """True if the reaction button shows an ACTIVE reaction (already liked).
+    'no reaction' (EN) / 'tiada reaksi' (MS) ⇒ not set."""
+    al = (aria_label or "").lower()
+    return bool(al) and "no reaction" not in al and "tiada" not in al
+
+
+def cmd_like(args: argparse.Namespace) -> int:
+    """Like (react) a post. Mirrors X's per-engagement like. Human-emulated.
+    Default is --dry-run (locate the button, report state, do NOT click);
+    pass --live to actually react. Idempotent: skips if already reacted."""
+    ha = _import_human_actions()
+    do_real = bool(args.live)
+
+    with linkedin_session(headed=args.headed, save_on_exit=True) as (_b, _c, page):
+        ok, reason, _ = _check_auth(page)
+        if not ok:
+            return _err(reason)
+
+        # Pre-context: come from the feed (real users don't teleport).
+        try:
+            page.goto("https://www.linkedin.com/feed/", wait_until="domcontentloaded",
+                      timeout=20_000)
+            ha.dwell(1.0, 2.4)
+            ha.smooth_scroll(page, 900)
+            ha.dwell(0.5, 1.2)
+        except Exception:
+            pass
+
+        if not _on_post_detail(page, args.post):
+            page.goto(f"https://www.linkedin.com/feed/update/{args.post}/",
+                      wait_until="domcontentloaded", timeout=30_000)
+            ha.dwell(1.5, 3.0)
+
+        body_el = page.query_selector('[componentkey^="feed-commentary_"]')
+        ha.read_dwell((body_el.inner_text() if body_el else "") or "")
+        ha.smooth_scroll(page, 400)
+        ha.dwell(0.6, 1.4)
+
+        btn = _find_like_button(page)
+        if not btn:
+            return _err("like_button_not_found")
+        before = btn.get_attribute("aria-label") or ""
+        already = _reaction_is_set(before)
+
+        if not do_real:
+            json.dump({
+                "ok": True, "dry_run": True, "post_urn": args.post,
+                "like_button_aria": before, "already_reacted": already,
+                "note": "Pass --live to actually react.",
+            }, sys.stdout)
+            return 0
+
+        if already:
+            json.dump({"ok": True, "dry_run": False, "post_urn": args.post,
+                       "submitted": False, "already_reacted": True}, sys.stdout)
+            return 0
+
+        ha.human_click(page, btn)
+        ha.dwell(1.2, 2.5)
+
+        # Re-find the button (it re-renders on toggle) and verify the flip.
+        after_btn = _find_like_button(page)
+        after = (after_btn.get_attribute("aria-label") if after_btn else "") or ""
+        liked = _reaction_is_set(after)
+        json.dump({"ok": True, "dry_run": False, "post_urn": args.post,
+                   "submitted": True, "liked_verified": liked,
+                   "aria_after": after}, sys.stdout)
+        return 0
+
+
 def cmd_reply(args: argparse.Namespace) -> int:
     """Reply to a specific comment. Uses human emulation throughout.
     Default is --dry-run; pass --live to actually submit."""
@@ -2032,6 +2124,17 @@ def main() -> int:
     comment.add_argument("--dry-run", action="store_true", default=True)
     comment.add_argument("--live", action="store_true")
     comment.set_defaults(fn=cmd_comment)
+
+    like = sp.add_parser("like", help="Like (react to) a post (human-emulated).")
+    like.add_argument("--post", required=True,
+                      help="urn:li:activity:... / ugcPost / share")
+    like.add_argument("--headed", action="store_true", default=True)
+    like.add_argument("--headless", dest="headed", action="store_false")
+    like.add_argument("--dry-run", action="store_true", default=True,
+                      help="default: locate the button + report state, do NOT click")
+    like.add_argument("--live", action="store_true",
+                      help="actually react (overrides --dry-run)")
+    like.set_defaults(fn=cmd_like)
 
     args = p.parse_args()
     return args.fn(args)

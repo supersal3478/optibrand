@@ -26,6 +26,7 @@ import asyncio
 import json
 import os
 import random
+import re
 import subprocess
 import sys
 import time as _time
@@ -229,11 +230,54 @@ async def _dismiss_blockers(s) -> None:
         pass
 
 
+def _like_li_post(post_urn: str | None, *, verbose: bool) -> str:
+    """Best-effort like of a LinkedIn post via `lipy like --live`. Non-fatal —
+    a like failure never rolls back the comment/reply it follows. Returns a
+    status string: liked | liked_unverified | already_liked | no_button |
+    no_post_urn | timeout | error."""
+    if not post_urn:
+        return "no_post_urn"
+    cmd = [str(LIPY_BIN), "like", "--post", post_urn, "--live"]
+    try:
+        p = subprocess.run(cmd, capture_output=True, text=True, timeout=150)
+    except subprocess.TimeoutExpired:
+        return "timeout"
+    out = (p.stdout or "").strip()
+    parsed = None
+    for line in reversed(out.splitlines()):
+        line = line.strip()
+        if line.startswith("{"):
+            try:
+                parsed = json.loads(line)
+                break
+            except json.JSONDecodeError:
+                continue
+    if verbose:
+        print(f"[flush:li-like] {out[-200:]}")
+    if not parsed or not parsed.get("ok"):
+        return "no_button" if (parsed or {}).get("error") == "like_button_not_found" else "error"
+    if parsed.get("already_reacted"):
+        return "already_liked"
+    if parsed.get("submitted"):
+        return "liked" if parsed.get("liked_verified") else "liked_unverified"
+    return "error"
+
+
+def _li_post_urn_for_like(parent_urn: str, mode: str) -> str | None:
+    """The post URN to like for a submitted item. goodwill → the post itself;
+    inbound → the parent post parsed out of the comment URN."""
+    if mode == "goodwill":
+        return parent_urn
+    m = re.match(r"urn:li:comment:\(urn:li:ugcPost:(\d+),", parent_urn or "")
+    return f"urn:li:ugcPost:{m.group(1)}" if m else None
+
+
 def _submit_one_li(parent_urn: str, text: str, *, mode: str, dry_run: bool, verbose: bool) -> dict:
     """Submit a LinkedIn item via the lipy Playwright CLI (humanized typing/mouse
     live inside lipy; no CDP). Inbound → `lipy reply --parent <comment-urn>`;
-    goodwill → `lipy comment --post <activity-urn>`. lipy has no like command yet,
-    so LinkedIn items aren't liked."""
+    goodwill → `lipy comment --post <activity-urn>`. After a successful live
+    submit, also likes the post (`lipy like`) to mirror X's every-comment-gets-a
+    -like behavior; the like is best-effort and non-fatal."""
     if mode == "goodwill":
         cmd = [str(LIPY_BIN), "comment", "--post", parent_urn, "--text", text]
     else:  # inbound: reply to a specific comment
@@ -259,7 +303,9 @@ def _submit_one_li(parent_urn: str, text: str, *, mode: str, dry_run: bool, verb
     if dry_run:
         return {"ok": True, "dry_run": True, "confirmation": "lipy_dry_run"}
     if parsed and parsed.get("ok"):
-        return {"ok": True, "confirmation": "lipy_posted"}
+        like_status = _like_li_post(_li_post_urn_for_like(parent_urn, mode),
+                                    verbose=verbose)
+        return {"ok": True, "confirmation": "lipy_posted", "like_status": like_status}
     return {"ok": False, "error": (parsed or {}).get("error") or "lipy_reply_failed",
             "detail": (out or (p.stderr or ""))[:300]}
 
