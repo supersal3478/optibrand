@@ -48,6 +48,7 @@ from x_human import HumanCDP  # noqa: E402
 
 HERMES_HOME = Path(os.environ.get("HERMES_HOME", Path.home() / ".hermes"))
 LOCK_PATH = HERMES_HOME / "state" / "outbox-flush.lock"
+HEARTBEAT_PATH = HERMES_HOME / "state" / "heartbeat.json"
 START_CHROME_CDP = PROJECT_ROOT / "skills" / "x-engage" / "start-chrome-cdp.sh"
 
 COMPOSER_SELECTOR = 'div[data-testid="tweetTextarea_0"]'
@@ -466,6 +467,67 @@ async def flush(*, batch: int, dry_run: bool, verbose: bool,
     return counts
 
 
+# ────────────────────────────────────────────── heartbeat ──
+
+
+def _chrome_reachable(port: int = 9222) -> bool:
+    import urllib.request
+    try:
+        with urllib.request.urlopen(f"http://localhost:{port}/json/version", timeout=2):
+            return True
+    except Exception:
+        return False
+
+
+async def _probe_login() -> bool | None:
+    """Best-effort X login check against the live tab. Returns True/False, or
+    None if we can't tell (Chrome down, or the tab isn't on x.com)."""
+    try:
+        async with open_session(tab_url_substring="x.com") as s:
+            raw = await s.eval_js(
+                'JSON.stringify({u:location.href,'
+                'li:!!document.querySelector("[data-testid=SideNav_AccountSwitcher_Button]")})',
+                await_promise=False)
+            d = json.loads(raw)
+            if "x.com" not in (d.get("u") or ""):
+                return None  # not on X — can't judge session state
+            return bool(d.get("li"))
+    except Exception:
+        return None
+
+
+def _record_heartbeat(counts: dict | None) -> None:
+    """Write a liveness marker every run so a SILENT stop becomes visible:
+    activity-report.py reads heartbeat.json to show 'last run / logged in?'.
+    Forces nothing — only probes login if Chrome is already up."""
+    up = _chrome_reachable()
+    logged_in: bool | None = None
+    if up:
+        try:
+            logged_in = asyncio.run(_probe_login())
+        except Exception:
+            logged_in = None
+    rec = {
+        "ts": datetime.now().astimezone().isoformat(timespec="seconds"),
+        "chrome_up": up,
+        "logged_in": logged_in,
+        "last_counts": counts or {},
+    }
+    # heartbeat.json is overwritten each run (no growth) and is the report's
+    # liveness source — so we do NOT log a per-run metric event (that would add
+    # ~720 lines/day to engagement_metrics.jsonl). Only the rare logout is logged.
+    try:
+        HEARTBEAT_PATH.parent.mkdir(parents=True, exist_ok=True)
+        HEARTBEAT_PATH.write_text(json.dumps(rec))
+    except OSError:
+        pass
+    if logged_in is False:
+        try:
+            log_event("session_logged_out", chrome_up=up)  # loud, queryable
+        except Exception:
+            pass
+
+
 # ────────────────────────────────────────────── cli ──
 
 
@@ -493,19 +555,24 @@ def main() -> int:
             print("[flush] another flush is running; exiting")
         return 0
 
+    counts: dict | None = None
+    rc = 0
     try:
         counts = asyncio.run(flush(batch=args.batch, dry_run=args.dry_run,
                                    verbose=args.verbose, no_hold=args.no_hold,
                                    no_jitter=args.no_jitter))
     except Exception as e:
         sys.stderr.write(f"flush crashed: {e}\n")
-        _release_lock()
-        return 2
+        rc = 2
     finally:
         _release_lock()
+        # Always record a heartbeat — even on idle runs and crashes — so the
+        # report can tell whether the loop is alive and the X session is valid.
+        _record_heartbeat(counts)
 
-    print(json.dumps(counts))
-    return 0
+    if counts is not None:
+        print(json.dumps(counts))
+    return rc
 
 
 if __name__ == "__main__":

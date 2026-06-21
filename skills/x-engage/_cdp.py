@@ -96,5 +96,13 @@ async def open_session(cdp_port: int = DEFAULT_CDP_PORT,
                        tab_url_substring: str = DEFAULT_TAB_URL_SUBSTRING):
     """Async context manager that yields a CDPSession bound to the picked tab."""
     tab = find_tab(cdp_port, tab_url_substring)
-    async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
+    # open_timeout caps the connect handshake so a wedged tab can't hang a cron
+    # tick forever (the prior version had no timeout — an unresponsive debugger
+    # socket would block indefinitely). close_timeout bounds teardown likewise.
+    async with websockets.connect(
+        tab["webSocketDebuggerUrl"],
+        max_size=20_000_000,
+        open_timeout=15,
+        close_timeout=5,
+    ) as ws:
         yield CDPSession(ws)

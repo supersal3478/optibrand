@@ -97,21 +97,58 @@ class AuditLog:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._cache: list[dict] | None = None  # lazy-loaded for dedup queries
 
+    _ROTATE_BYTES = 25_000_000      # archive + truncate the active log past this
+    _KEEP_BYTES = 4_000_000         # how much recent tail to retain on rotate
+    _TAIL_READ_BYTES = 2_000_000    # cap per-tick read so a big log can't slow ticks
+
     def write(self, **fields) -> None:
         rec = {"ts": utcnow(), **fields}
         if self.dry_run:
             print(f"[audit dry-run] {json.dumps(rec, ensure_ascii=False)}")
             return
+        self._maybe_rotate()
         with self.path.open("a") as f:
             f.write(json.dumps(rec, ensure_ascii=False) + "\n")
         self._cache = None  # invalidate
+
+    def _maybe_rotate(self) -> None:
+        """When the audit log gets large, archive it to a dated file and keep
+        only the recent tail active. Bounds disk use AND keeps _entries() fast,
+        since it previously re-read the WHOLE file on every minute tick."""
+        try:
+            if not self.path.exists() or self.path.stat().st_size <= self._ROTATE_BYTES:
+                return
+            size = self.path.stat().st_size
+            with self.path.open("rb") as f:
+                f.seek(max(0, size - self._KEEP_BYTES))
+                f.readline()  # drop partial line
+                tail = f.read()
+            stamp = utcnow()[:10]
+            archive = self.path.with_name(f"{self.path.stem}-{stamp}{self.path.suffix}")
+            n = 1
+            while archive.exists():
+                archive = self.path.with_name(f"{self.path.stem}-{stamp}.{n}{self.path.suffix}")
+                n += 1
+            self.path.rename(archive)
+            self.path.write_bytes(tail)
+        except OSError:
+            pass
 
     def _entries(self) -> list[dict]:
         if self._cache is not None:
             return self._cache
         out: list[dict] = []
         if self.path.exists():
-            for line in self.path.read_text().splitlines():
+            # Read only the tail. Idempotency needs the current UTC minute and
+            # count_today needs today's lines — both live at the end of the file.
+            # Reading the whole file every tick was the #1 slow-death risk.
+            size = self.path.stat().st_size
+            with self.path.open("rb") as f:
+                if size > self._TAIL_READ_BYTES:
+                    f.seek(size - self._TAIL_READ_BYTES)
+                    f.readline()  # discard the partial first line
+                blob = f.read()
+            for line in blob.decode("utf-8", "replace").splitlines():
                 line = line.strip()
                 if not line:
                     continue
@@ -621,7 +658,15 @@ def main() -> int:
     p.add_argument("--windows", default=None, help="Override windows.yaml path (for testing).")
     p.add_argument("--audit-log", default=None, help="Override audit.jsonl path (for testing).")
     args = p.parse_args()
-    return tick(args)
+    try:
+        return tick(args)
+    except Exception as e:
+        # A bad config or transient error must not crash the tick with an
+        # unhandled traceback. Log it and exit non-zero; next minute retries.
+        import traceback
+        sys.stderr.write(f"[schedule-tick] tick failed: {e}\n")
+        traceback.print_exc()
+        return 1
 
 
 if __name__ == "__main__":

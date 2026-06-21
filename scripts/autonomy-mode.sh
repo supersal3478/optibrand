@@ -157,7 +157,7 @@ step "Registering Hermes cron jobs (schedule-tick + daily-report + voice-retrain
 # All caps/windows enforcement happens inside the tick — primitives stay dumb.
 TICK_PROMPT="Run scripts/schedule-tick.py from $PROJECT_ROOT. It is a Python orchestrator (not an LLM prompt) — invoke it as a subprocess: cd $PROJECT_ROOT && $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python scripts/schedule-tick.py. Do NOT modify the prompt; the tick handles everything."
 
-REPORT_PROMPT="Run scripts/daily-report.py from $PROJECT_ROOT. Invoke as: $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/daily-report.py. Writes ~/.hermes/reports/YYYY-MM-DD.md from the audit log."
+REPORT_PROMPT="Run scripts/activity-report.py from $PROJECT_ROOT. Invoke as: $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/activity-report.py --save. Writes ~/.hermes/reports/activity-YYYY-MM-DD.md (comments left, replies, likes, vetoes, skips, liveness + full ledger) from the real engagement logs (outbox.jsonl + engagement_metrics.jsonl)."
 
 RETRAIN_PROMPT="Run scripts/voice-train.py --retrain from $PROJECT_ROOT. Invoke as: $PROJECT_ROOT/vendor/hermes-agent/.venv/bin/python $PROJECT_ROOT/scripts/voice-train.py --retrain. Weights original corpus 2x over agent-generated sent_replies.jsonl."
 
