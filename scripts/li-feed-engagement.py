@@ -58,7 +58,190 @@ def _load_inbound_module():
 
 
 _IB = _load_inbound_module()
-draft_reply = _IB.draft_reply
+draft_reply = _IB.draft_reply  # (inbound framing; goodwill uses draft_goodwill below)
+
+
+# ── Goodwill quality gate + drafter ───────────────────────────────────────────
+# Goodwill comments on STRANGERS' posts carry the most restriction risk, so unlike
+# inbound (replying on your own posts) we (1) JUDGE each post first — skip promo /
+# low-value / off-brand — and (2) draft with an outbound "additive comment" framing
+# (the inbound draft_reply treats the text as a comment ON your post, which produced
+# dismissive replies like "No thanks, I'll pass"). Mirrors X feed-engagement.
+
+# Minimum judge confidence to engage. Goodwill is higher-risk → be conservative.
+JUDGE_MIN_CONFIDENCE = 0.55
+
+
+def _brand_audience_context() -> str:
+    """The slices of BRAND.md the judge needs: who the brand serves + what's
+    off-limits. Kept small so the judgment stays about fit, not voice/veto."""
+    try:
+        text = (PROJECT_ROOT / "BRAND.md").read_text()
+    except OSError:
+        return ""
+    wanted = ("## Identity", "## Audiences", "## Off-limits topics",
+              "## Engagement principles")
+    sections, lines, keep = [], text.splitlines(), False
+    cur: list[str] = []
+    for ln in lines:
+        if ln.startswith("## "):
+            if keep and cur:
+                sections.append("\n".join(cur).strip())
+            cur, keep = [], ln.strip() in wanted
+        if keep:
+            cur.append(ln)
+    if keep and cur:
+        sections.append("\n".join(cur).strip())
+    return "\n\n".join(s for s in sections if s)[:2500]
+
+
+def judge_goodwill_post(author: str, text: str) -> dict:
+    """Decide whether this feed post is worth a positive, additive goodwill
+    comment. Returns {decision: 'yes'|'no', confidence: float, reason: str}.
+    Fail-CLOSED: any error → 'no' (never comment on an unjudged stranger post)."""
+    import httpx
+    import re
+    import time
+    cfg = _IB._load_azure_config()
+    if not cfg.get("api_key") or not cfg.get("base_url"):
+        return {"decision": "no", "confidence": 0.0, "reason": "judge_error:no-azure-config"}
+    audience_ctx = _brand_audience_context()
+    if not audience_ctx:
+        return {"decision": "no", "confidence": 0.0, "reason": "judge_error:no-brand-audience"}
+    system = (
+        "You decide whether the brand below should leave a PUBLIC goodwill comment "
+        "on a stranger's LinkedIn post. A goodwill comment is outbound relationship-"
+        "building, so it must be on a post where the brand can add a genuine, "
+        "positive, on-topic point in front of an aligned audience.\n\n"
+        "BE PERMISSIVE on substantive tech/AI/operator topics: AI, agents, "
+        "automation, agentic workflows, LLMs, Claude, MCP, browser automation, dev "
+        "tooling, infrastructure, shipping software, building products, running an "
+        "agency/ops — even if generic or hype-y, the commenters are the brand's "
+        "audience. When in doubt on a substantive tech-adjacent post → YES.\n\n"
+        "Decide NO when the post is:\n"
+        "  - Promotional / an ad / a lead-magnet ('comment WORD and I'll DM you', "
+        "    'DM me', selling a course/tool/webinar), or engagement-bait\n"
+        "  - Low-value: no substantive point to engage with (one-liner, pure quote, "
+        "    'thoughts?', reposted meme, giveaway)\n"
+        "  - Off-brand / off-target: crypto/trading, hustle-porn/motivational, "
+        "    politics, drama/call-outs, job-seeking, unrelated lifestyle\n"
+        "  - Anything where a brand comment would read as spam or self-promotion\n\n"
+        "NEVER endorse a 'yes' just to participate. A wrong comment is worse than a "
+        "missed one. Return ONLY JSON: "
+        '{"decision":"yes"|"no","confidence":<float 0..1>,"reason":<short string>}. '
+        "No prose, no markdown, no code fences."
+    )
+    user = (
+        f"=== brand context ===\n{audience_ctx}\n\n"
+        f"=== target LinkedIn post ===\n"
+        f"Author: {author}\n"
+        f"Post text:\n{text}\n\n"
+        "Decide. JSON only."
+    )
+    t0 = time.time()
+    try:
+        resp = httpx.post(
+            f"{cfg['base_url']}/chat/completions",
+            headers={"api-key": cfg["api_key"], "Content-Type": "application/json"},
+            json={"model": cfg["model"],
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": user}],
+                  "max_tokens": 200, "temperature": 0.2},
+            timeout=60,
+        )
+    except httpx.RequestError as e:
+        return {"decision": "no", "confidence": 0.0, "reason": f"judge_error:http:{str(e)[:80]}"}
+    print(f"        … judge returned in {time.time()-t0:.1f}s (HTTP {resp.status_code})", flush=True)
+    if resp.status_code != 200:
+        return {"decision": "no", "confidence": 0.0,
+                "reason": f"judge_error:non-200:{resp.status_code}"}
+    raw = (resp.json().get("choices", [{}])[0].get("message", {}).get("content") or "").strip()
+    if raw.startswith("```"):
+        raw = re.sub(r"^```[a-zA-Z]*\s*", "", raw)
+        raw = re.sub(r"\s*```$", "", raw)
+    try:
+        out = json.loads(raw)
+        decision = str(out.get("decision", "no")).strip().lower()
+        confidence = float(out.get("confidence", 0.5))
+        reason = str(out.get("reason", ""))[:240]
+    except (json.JSONDecodeError, ValueError, TypeError):
+        m = re.search(r'"decision"\s*:\s*"?(yes|no)"?', raw, re.IGNORECASE)
+        if not m:
+            return {"decision": "no", "confidence": 0.0,
+                    "reason": f"judge_error:bad-json:{raw[:120]}"}
+        decision = m.group(1).lower()
+        mc = re.search(r'"confidence"\s*:\s*([0-9]+(?:\.[0-9]+)?)', raw)
+        confidence = float(mc.group(1)) if mc else 0.5
+        mr = re.search(r'"reason"\s*:\s*"([^"]{1,240})"', raw)
+        reason = (mr.group(1) if mr else "no-reason") + " [recovered]"
+    if decision not in ("yes", "no"):
+        decision = "no"
+    return {"decision": decision, "confidence": max(0.0, min(1.0, confidence)), "reason": reason}
+
+
+def draft_goodwill(author: str, text: str) -> dict:
+    """Draft a goodwill comment on a stranger's LinkedIn post (outbound framing —
+    ADD a point, don't just agree). Returns the same shape as draft_reply
+    (decision DRAFT|REFUSE, draft, length_target, autofixes)."""
+    import httpx
+    import time
+    cfg = _IB._load_azure_config()
+    if not cfg.get("api_key") or not cfg.get("base_url"):
+        return {"decision": "REFUSE", "reasons": [{"rule": "no-azure-config"}]}
+    voice_ctx = _IB._brand_voice_context()
+    length_label, length_instruction, max_words = _IB.pick_length_target()
+    system = (
+        "You are Sal AI (in/sal-ai on LinkedIn). You're leaving a GOODWILL comment on "
+        "someone ELSE's LinkedIn post you came across in your feed — outbound "
+        "engagement to build relationships with other operators in your space. "
+        "Match the voice/tone/vocabulary distilled below from BRAND.md and your voice profile.\n\n"
+        "ADD a concrete experience, a specific counter-point, or a relevant anecdote "
+        "that moves the conversation forward — do NOT just agree, summarize, or praise. "
+        "DO NOT use the author's name, first name, display name, or handle anywhere. "
+        "Engage directly with the actual point they made.\n\n"
+        f"{length_instruction}\n\n"
+        "No em-dash (—). No hashtags. No links. No pitching yourself or your services. "
+        "Never open with 'Great post', 'Great question', 'Absolutely', 'Thanks for sharing', "
+        "'I love this', 'This is amazing', 'Great point', or any sycophantic opener. "
+        "Output ONLY the comment text — no JSON, no quotes, no preamble."
+    )
+    user = (
+        f"=== voice + brand context ===\n{voice_ctx}\n\n"
+        f"=== outbound goodwill target (LinkedIn) ===\n"
+        f"author (DO NOT mention): {author}\n"
+        f"post text: {text}\n\n"
+        "Write the goodwill comment now."
+    )
+    t0 = time.time()
+    try:
+        resp = httpx.post(
+            f"{cfg['base_url']}/chat/completions",
+            headers={"api-key": cfg["api_key"], "Content-Type": "application/json"},
+            json={"model": cfg["model"],
+                  "messages": [{"role": "system", "content": system},
+                               {"role": "user", "content": user}],
+                  "max_tokens": 400, "temperature": 0.7},
+            timeout=90,
+        )
+    except httpx.RequestError as e:
+        return {"decision": "REFUSE", "reasons": [{"rule": "http-error", "detail": str(e)[:200]}]}
+    print(f"        … LLM returned in {time.time()-t0:.1f}s (HTTP {resp.status_code})", flush=True)
+    if resp.status_code != 200:
+        return {"decision": "REFUSE",
+                "reasons": [{"rule": "azure-non-200", "status": resp.status_code,
+                             "body": resp.text[:300]}]}
+    draft = ((resp.json().get("choices", [{}])[0].get("message", {}).get("content")) or "").strip()
+    if not draft:
+        return {"decision": "REFUSE", "reasons": [{"rule": "empty-llm-output"}]}
+    cleaned, refused, autofixes = _IB._inline_brand_guard(draft)
+    if refused:
+        return {"decision": "REFUSE", "draft": cleaned, "raw_draft": draft,
+                "reasons": [{"rule": r} for r in refused],
+                "autofixes": autofixes, "length_target": length_label}
+    result = {"decision": "DRAFT", "draft": cleaned, "raw_draft": draft,
+              "autofixes": autofixes, "length_target": length_label}
+    _IB.apply_length_and_punctuation_fixes(result, max_words)
+    return result
 
 
 def _self_name() -> str | None:
@@ -182,7 +365,23 @@ def main() -> int:
 
         print(f"\n[post] {author}")
         print(f"       {text[:160]}")
-        res = draft_reply("linkedin", author, text)
+
+        # Quality gate FIRST — goodwill only on worthwhile, on-brand posts.
+        verdict = judge_goodwill_post(author, text)
+        decision = verdict.get("decision")
+        conf = float(verdict.get("confidence") or 0.0)
+        if decision != "yes" or conf < JUDGE_MIN_CONFIDENCE:
+            print(f"       SKIP — judge {decision} (conf {conf:.2f}): {verdict.get('reason')}")
+            seen[urn] = {"ts": _utcnow(), "status": "skip_judge",
+                         "reason": verdict.get("reason")}
+            _metrics.log_event("skipped_judge", platform="linkedin", mode="goodwill",
+                               parent_url=post.get("url"),
+                               judge_decision=decision, judge_confidence=conf,
+                               judge_reason=verdict.get("reason"))
+            continue
+        print(f"       judge: yes (conf {conf:.2f}) — {verdict.get('reason')}")
+
+        res = draft_goodwill(author, text)
         if res.get("decision") != "DRAFT" or not res.get("draft"):
             print(f"       SKIP — drafter {res.get('decision', '?')}: {res.get('reasons')}")
             seen[urn] = {"ts": _utcnow(), "status": "refused"}
