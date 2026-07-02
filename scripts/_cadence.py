@@ -79,6 +79,99 @@ def _stable_minutes(anchor: datetime | None, spec: dict) -> float:
     return lo + (h % 1000) / 1000.0 * (hi - lo)
 
 
+# ───────────────────────────────── recovery ramp ──
+
+def recovery_stage(now: datetime) -> dict | None:
+    """The active recovery-ramp stage from cadence.yaml, or None when the ramp
+    is disabled, hasn't started, or has completed. Platform-independent: the
+    same stage applies to every platform."""
+    rc = cfg().get("recovery") or {}
+    if not rc.get("enabled") or not rc.get("start_date"):
+        return None
+    try:
+        start = datetime.fromisoformat(str(rc["start_date"])).date()
+    except ValueError:
+        return None
+    days = (now.date() - start).days
+    if days < 0:
+        return None
+    week = days // 7
+    acc = 0
+    for i, stage in enumerate(rc.get("stages") or []):
+        acc += int(stage.get("weeks", 1))
+        if week < acc:
+            return {**stage, "_stage_num": i + 1, "_week": week + 1}
+    return None
+
+
+# Range keys where a LARGER value means LESS activity (waiting intervals/gaps),
+# vs. volume keys (sessions, actions, session length) where larger = more.
+_INTERVAL_KEYS = {"dense_minutes", "taper_minutes", "quiet_minutes", "gap_minutes"}
+
+
+def _merge_reduce_only(base: dict, override: dict) -> dict:
+    """Apply a recovery override on top of a platform's baseline config, with
+    the invariant that recovery can only REDUCE activity: volume ranges are
+    element-wise min'd against the baseline, interval/gap ranges element-wise
+    max'd (longer waits = quieter), and skip_day_prob is max'd. Keys the
+    baseline doesn't have (e.g. force_tier) pass through as-is."""
+    merged = dict(base)
+    for k, v in override.items():
+        if k in ("enabled", "_stage_num", "_week"):
+            continue
+        b = base.get(k)
+        if isinstance(v, dict) and isinstance(b, dict) and "min" in v and "min" in b:
+            pick = max if k in _INTERVAL_KEYS else min
+            merged[k] = {"min": pick(v["min"], b["min"]), "max": pick(v["max"], b["max"])}
+        elif k == "skip_day_prob" and b is not None:
+            merged[k] = max(float(v), float(b))
+        else:
+            merged[k] = v
+    return merged
+
+
+def _effective_cfg(now: datetime, platform: str, mode: str) -> tuple[dict, dict | None]:
+    """(platform mode-config with any active recovery stage applied, stage)."""
+    pc = (cfg().get(platform, {}) or {}).get(mode, {}) or {}
+    stage = recovery_stage(now)
+    if stage and isinstance(stage.get(mode), dict):
+        pc = _merge_reduce_only(pc, stage[mode])
+    return pc, stage
+
+
+# ───────────────────────────────── rate-limit circuit breaker ──
+
+def rate_limit_cooldown(now: datetime, platform: str) -> str | None:
+    """If a `rate_limited` event was logged recently, return a human-readable
+    reason to stand down; otherwise None. Cooldown length is stable per event
+    (derived from its timestamp): base–2×base hours, base from caps.yaml
+    <platform>.reads.rate_limit_cooldown_hours (default 3)."""
+    last_rl = _last_ts(now, "rate_limited", platform, None)
+    if last_rl is None:
+        return None
+    base_h = float((_caps.caps().get(platform, {}).get("reads", {}) or {})
+                   .get("rate_limit_cooldown_hours", 3))
+    cool_min = _stable_minutes(last_rl, {"min": base_h * 60, "max": base_h * 120})
+    elapsed = (now - last_rl).total_seconds() / 60
+    if elapsed < cool_min:
+        return (f"rate-limited {elapsed/60:.1f}h ago — standing down "
+                f"{(cool_min - elapsed)/60:.1f}h more")
+    return None
+
+
+def _views_exhausted(platform: str) -> str | None:
+    """If today's page-view budget (caps.yaml <platform>.reads.page_views_per_day)
+    is used up, return a reason string; None when under budget or no cap set."""
+    cap = int((_caps.caps().get(platform, {}).get("reads", {}) or {})
+              .get("page_views_per_day", 0))
+    if cap <= 0:
+        return None
+    used = _metrics.page_views_today(platform)
+    if used >= cap:
+        return f"view budget reached ({used}/{cap} page views today)"
+    return None
+
+
 # ───────────────────────────────── windows ──
 
 def _window(platform: str, mode: str) -> tuple[set[int], int, int]:
@@ -130,12 +223,17 @@ def _last_ts(now: datetime, event: str, platform: str, mode: str) -> datetime | 
 def daily_plan(now: datetime, platform: str) -> dict:
     """Today's outbound (goodwill) plan: skip-day flag + session windows + budget.
     Deterministic for (date, platform, machine)."""
-    pc = (cfg().get(platform, {}) or {}).get("outbound", {}) or {}
+    pc, stage = _effective_cfg(now, platform, "outbound")
     date_key = now.strftime("%Y-%m-%d")
     r = _rng(date_key, platform, "outbound")
     days, wstart, wend = _window(platform, "outbound")
 
-    plan = {"skip_day": False, "sessions": [], "daily_budget": 0}
+    plan = {"skip_day": False, "sessions": [], "daily_budget": 0, "recovery_off": False}
+    if stage and stage.get("outbound", {}).get("enabled") is False:
+        plan["skip_day"] = True
+        plan["recovery_off"] = True
+        plan["recovery_stage"] = stage.get("_stage_num")
+        return plan
     if now.weekday() not in days:
         plan["skip_day"] = True
         return plan
@@ -174,9 +272,17 @@ def _current_session(now: datetime, plan: dict) -> dict | None:
 def should_act_outbound(now: datetime, platform: str) -> tuple[bool, str]:
     if not _caps.is_live(platform):
         return False, "platform not live"
+    cool = rate_limit_cooldown(now, platform)
+    if cool:
+        return False, cool
+    views = _views_exhausted(platform)
+    if views:
+        return False, views
     if not _caps.in_window(platform, "outbound"):
         return False, "outside outbound window"
     plan = daily_plan(now, platform)
+    if plan.get("recovery_off"):
+        return False, f"recovery ramp stage {plan.get('recovery_stage')}: outbound disabled"
     if plan["skip_day"]:
         return False, "skip day (no engagement today)"
     sess = _current_session(now, plan)
@@ -187,7 +293,7 @@ def should_act_outbound(now: datetime, platform: str) -> tuple[bool, str]:
         return False, f"daily budget reached ({done}/{plan['daily_budget']})"
     if not _caps.under_cap(platform, "outbound"):
         return False, "caps.yaml daily cap reached"
-    pc = (cfg().get(platform, {}) or {}).get("outbound", {}) or {}
+    pc, _ = _effective_cfg(now, platform, "outbound")
     last_fire = _last_ts(now, "cadence_fire", platform, "outbound")
     if last_fire is not None:
         gap = _stable_minutes(last_fire, pc.get("gap_minutes", {"min": 5, "max": 15}))
@@ -201,9 +307,15 @@ def should_act_outbound(now: datetime, platform: str) -> tuple[bool, str]:
 def inbound_due(now: datetime, platform: str) -> tuple[bool, str]:
     if not _caps.is_live(platform):
         return False, "platform not live"
+    cool = rate_limit_cooldown(now, platform)
+    if cool:
+        return False, cool
+    views = _views_exhausted(platform)
+    if views:
+        return False, views
     if not _caps.in_window(platform, "inbound"):
         return False, "outside inbound window"
-    pc = (cfg().get(platform, {}) or {}).get("inbound", {}) or {}
+    pc, _ = _effective_cfg(now, platform, "inbound")
     done = _count_today(now, "queued_outbox", platform, "inbound")
     budget = _rng_int(_rng(now.strftime("%Y-%m-%d"), platform, "inbound"),
                       pc.get("daily_actions", {"min": 0, "max": 12}))
@@ -216,7 +328,9 @@ def inbound_due(now: datetime, platform: str) -> tuple[bool, str]:
     last_activity = _last_ts(now, "queued_outbox", platform, "inbound")
     fresh_h = float(pc.get("fresh_window_hours", 2))
     taper_h = float(pc.get("taper_window_hours", 10))
-    if last_activity is not None and (now - last_activity) < timedelta(hours=fresh_h):
+    if pc.get("force_tier") == "quiet":
+        tier, spec = "quiet (recovery)", pc.get("quiet_minutes", {"min": 150, "max": 240})
+    elif last_activity is not None and (now - last_activity) < timedelta(hours=fresh_h):
         tier, spec = "dense", pc.get("dense_minutes", {"min": 12, "max": 25})
     elif last_activity is not None and (now - last_activity) < timedelta(hours=fresh_h + taper_h):
         tier, spec = "taper", pc.get("taper_minutes", {"min": 45, "max": 90})
@@ -236,7 +350,13 @@ def describe_day(date: datetime, platform: str) -> str:
     """Human-readable simulation of a day's outbound plan + inbound tiers."""
     plan = daily_plan(date, platform)
     lines = [f"=== {platform} cadence — {date.strftime('%Y-%m-%d (%a)')} ==="]
-    if plan["skip_day"]:
+    stage = recovery_stage(date)
+    if stage:
+        lines.append(f"  RECOVERY RAMP: stage {stage['_stage_num']}, week {stage['_week']} "
+                     "(activity reduced; see cadence.yaml recovery block)")
+    if plan.get("recovery_off"):
+        lines.append("  OUTBOUND: disabled by recovery ramp — no goodwill this stage.")
+    elif plan["skip_day"]:
         lines.append("  OUTBOUND: skip day — no feed goodwill today.")
     else:
         lines.append(f"  OUTBOUND: {len(plan['sessions'])} session(s), "
@@ -245,8 +365,10 @@ def describe_day(date: datetime, platform: str) -> str:
             lines.append(f"    session {i}: {s['start'].strftime('%H:%M')}–"
                          f"{s['end'].strftime('%H:%M')}  (up to {s['budget']} comments, "
                          f"~5-15m apart)")
-    pc = (cfg().get(platform, {}) or {}).get("inbound", {}) or {}
+    pc, _ = _effective_cfg(date, platform, "inbound")
     lines.append("  INBOUND (decay, anchored to fresh comment activity):")
+    if pc.get("force_tier") == "quiet":
+        lines.append("    recovery: quiet tier FORCED — no dense polling this stage")
     lines.append(f"    dense  ~{pc.get('dense_minutes',{}).get('min','?')}-"
                  f"{pc.get('dense_minutes',{}).get('max','?')}m  for first "
                  f"{pc.get('fresh_window_hours','?')}h of activity")

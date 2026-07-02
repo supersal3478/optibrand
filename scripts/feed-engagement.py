@@ -281,6 +281,7 @@ async def _navigate_and_scroll_extract(url: str, scroll_passes: int = 5,
         await asyncio.sleep(3)
     async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
         await _ws_call(ws, 1, "Page.navigate", {"url": url})
+        _metrics.log_page_view("x", via="feed")
         await asyncio.sleep(3)
         mid = 2
         elapsed = 3.0
@@ -297,8 +298,21 @@ async def _navigate_and_scroll_extract(url: str, scroll_passes: int = 5,
             await asyncio.sleep(2)
             elapsed += 2
         if articles == 0:
-            print(f"[x]   (still 0 articles after {elapsed:.0f}s — page may be empty or DOM shifted)",
-                  flush=True)
+            # Zero articles can mean an empty page OR X throttling us. On a
+            # throttle, log rate_limited so the cadence engine stands down.
+            r = await _ws_call(ws, mid, "Runtime.evaluate", {
+                "expression": "((document.body && document.body.innerText) || '').slice(0, 4000)",
+                "returnByValue": True,
+            })
+            mid += 1
+            body = (r.get("result", {}).get("result", {}).get("value") or "").lower()
+            if "rate limit" in body:
+                print("[x]   RATE LIMITED by X — logged rate_limited; cadence will stand down",
+                      flush=True)
+                _metrics.log_event("rate_limited", platform="x", url=url)
+            else:
+                print(f"[x]   (still 0 articles after {elapsed:.0f}s — page may be empty or DOM shifted)",
+                      flush=True)
             return []
         for i in range(scroll_passes):
             await _ws_call(ws, mid, "Runtime.evaluate", {
@@ -332,6 +346,7 @@ async def navigate_chrome_to(url: str, settle_seconds: float = 3.0) -> None:
     try:
         async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
             await _ws_call(ws, 1, "Page.navigate", {"url": url})
+            _metrics.log_page_view("x", via="feed_backnav")
             await asyncio.sleep(settle_seconds)
     except Exception:
         pass

@@ -8,18 +8,19 @@ youtube:
     end:   "23:59"
 
 x:
-  # Windows widened 2026-06-17 to cover SGT posting schedule converted to
-  # Toronto local. Your goodwill triggers fire at Toronto 03:30, 05:30, 09:30,
-  # 13:30, 18:30, 20:30 — old 09:00–18:00 outbound window excluded 4 of 6 trips.
-  # Caps + hold-buffer + jitter remain the real volume/safety controls.
+  # Narrowed 2026-07-02 (recovery ramp): the 24/7 window let cadence sessions
+  # land at 3-5am Toronto — machine-like for a throttled account rebuilding
+  # trust. 09:00-22:00 keeps all activity in plausibly-human hours. Trade-off:
+  # goodwill no longer precedes the overnight SGT posts (03:30/05:30 Toronto);
+  # widen again only after the account is back in good standing.
   inbound:
     days: [0, 1, 2, 3, 4, 5, 6]
-    start: "00:00"
-    end:   "23:59"
+    start: "09:00"
+    end:   "22:00"
   outbound:
-    days: [0, 1, 2, 3, 4, 5, 6]   # 7 days/week — SGT posting is 6/day every day
-    start: "00:00"
-    end:   "23:59"
+    days: [0, 1, 2, 3, 4, 5, 6]
+    start: "09:00"
+    end:   "22:00"
 
 linkedin:
   inbound:

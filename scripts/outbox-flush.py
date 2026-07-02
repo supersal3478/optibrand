@@ -40,7 +40,13 @@ sys.path.insert(0, str(PROJECT_ROOT / "skills" / "x-engage"))
 from _caps import (  # noqa: E402
     in_window, is_live, random_jitter_seconds, under_cap,
 )
-from _metrics import log_event  # noqa: E402
+from _metrics import log_event, log_page_view  # noqa: E402
+
+
+def _log_li_page_views(n: int, *, via: str) -> None:
+    """Count the page loads a lipy write-command makes against the LinkedIn
+    read budget (each lipy live command navigates feed pre-context + permalink)."""
+    log_page_view("linkedin", n=n, via=via)
 from _outbox import (  # noqa: E402
     cancel, mark_failed, mark_submitted, mature_items, pending_items,
 )
@@ -238,6 +244,7 @@ def _like_li_post(post_urn: str | None, *, verbose: bool) -> str:
     if not post_urn:
         return "no_post_urn"
     cmd = [str(LIPY_BIN), "like", "--post", post_urn, "--live"]
+    _log_li_page_views(2, via="lipy_like")  # feed pre-context + permalink
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=150)
     except subprocess.TimeoutExpired:
@@ -284,6 +291,7 @@ def _submit_one_li(parent_urn: str, text: str, *, mode: str, dry_run: bool, verb
         cmd = [str(LIPY_BIN), "reply", "--parent", parent_urn, "--text", text]
     if not dry_run:
         cmd.append("--live")
+    _log_li_page_views(2, via="lipy_submit")  # feed pre-context + permalink
     try:
         p = subprocess.run(cmd, capture_output=True, text=True, timeout=180)
     except subprocess.TimeoutExpired:

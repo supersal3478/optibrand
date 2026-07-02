@@ -404,6 +404,7 @@ async def _navigate_and_extract(url: str, max_wait_s: float = 25.0,
         await asyncio.sleep(3)
     async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
         await _ws_call(ws, 1, "Page.navigate", {"url": url})
+        _metrics.log_page_view("x", via="inbound")
         await asyncio.sleep(3)
         mid = 2
         elapsed = 3.0
@@ -421,8 +422,22 @@ async def _navigate_and_extract(url: str, max_wait_s: float = 25.0,
             await asyncio.sleep(2)
             elapsed += 2
         if articles == 0:
-            print(f"[x]   (still 0 articles after {elapsed:.0f}s — page may be empty or DOM shifted)",
-                  flush=True)
+            # Zero articles can mean an empty page OR X throttling us. Check the
+            # visible error text; on a throttle, log rate_limited so the cadence
+            # engine stands down instead of hammering into the limit.
+            r = await _ws_call(ws, mid, "Runtime.evaluate", {
+                "expression": "((document.body && document.body.innerText) || '').slice(0, 4000)",
+                "returnByValue": True,
+            })
+            mid += 1
+            body = (r.get("result", {}).get("result", {}).get("value") or "").lower()
+            if "rate limit" in body:
+                print("[x]   RATE LIMITED by X — logged rate_limited; cadence will stand down",
+                      flush=True)
+                _metrics.log_event("rate_limited", platform="x", url=url)
+            else:
+                print(f"[x]   (still 0 articles after {elapsed:.0f}s — page may be empty or DOM shifted)",
+                      flush=True)
             return []
         # Phase 2: scroll to load more posts. X lazy-loads each scroll.
         for i in range(scroll_passes):
@@ -550,6 +565,7 @@ async def navigate_chrome_to(url: str, settle_seconds: float = 3.0) -> None:
     try:
         async with websockets.connect(tab["webSocketDebuggerUrl"], max_size=20_000_000) as ws:
             await _ws_call(ws, 1, "Page.navigate", {"url": url})
+            _metrics.log_page_view("x", via="inbound_backnav")
             await asyncio.sleep(settle_seconds)
     except Exception:
         pass  # navigate-back is cosmetic; don't crash the loop if Chrome went away
@@ -619,6 +635,8 @@ def fetch_li_inbound(limit: int) -> dict:
     list of OTHER people's comments to reply to: {ok, items:[{urn, author, text,
     post_url}]}. The `urn` is the comment URN that `lipy reply --parent` needs."""
     rc, out, err = _run([str(LIPY_BIN), "inbound", "--limit", str(limit)], timeout=180)
+    # lipy inbound loads the recent-activity page + up to `limit` post permalinks.
+    _metrics.log_page_view("linkedin", n=1 + limit, via="lipy_inbound")
     parsed = _parse_json(out)
     if not parsed or not parsed.get("ok"):
         return {"ok": False, "error": (err or out).strip()[:300]}

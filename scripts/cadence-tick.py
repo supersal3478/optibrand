@@ -73,9 +73,24 @@ def run_tick(platform: str, dry_run: bool, verbose: bool) -> int:
         print(f"[inbound]  {'CHECK' if due_in else 'skip'} — {why_in}")
     if due_in and not dry_run:
         _metrics.log_event("cadence_fire", platform=platform, mode="inbound")
-        _fire([sys.executable, str(SCRIPTS / "inbound-engagement.py"),
-               "--platforms", platform, "--limit", "3", "--live"],
-              timeout=300, verbose=verbose)
+        cmd = [sys.executable, str(SCRIPTS / "inbound-engagement.py"),
+               "--platforms", platform, "--limit", "3", "--live"]
+        if platform == "x":
+            # Views are what X rate-limits, so most checks are CHEAP: the
+            # notifications/mentions page only (1 page load — replies to your
+            # posts mention you). The full profile sweep (profile + every
+            # permalink + back-nav ≈ 10-15 loads) runs once per day as a
+            # safety net for anything mentions missed.
+            if _metrics.count_today("inbound_full_sweep", platform="x") == 0:
+                source = "my-posts"
+                _metrics.log_event("inbound_full_sweep", platform="x")
+            else:
+                source = "mentions"
+            cmd += ["--source", source]
+            if verbose:
+                print(f"[inbound]  source={source} "
+                      f"({'daily full sweep' if source == 'my-posts' else 'cheap mentions check'})")
+        _fire(cmd, timeout=300, verbose=verbose)
         fired += 1
 
     if verbose:

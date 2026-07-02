@@ -9,6 +9,42 @@
 # from a per-machine seed, so the rhythm is stable within a day but varies
 # day-to-day and differs across machines. Times are minutes unless noted.
 
+# Recovery ramp — gradual re-entry after a rate-limit / restriction event.
+# Applies to EVERY platform identically (one engine, keyed off this block).
+# Stages run in order from start_date, each for `weeks` weeks; when the stages
+# are exhausted the platform returns to its normal config below. Stage values
+# can only REDUCE activity relative to the platform baseline (ranges are
+# element-wise min'd against baseline; skip_day_prob is max'd) — a stage can
+# never make a platform busier than its normal config.
+# To disable the ramp: set enabled: false (or delete start_date).
+recovery:
+  enabled: true
+  start_date: "2026-07-02"
+  stages:
+    - weeks: 2                       # weeks 1-2: NO outbound; quiet inbound glances only
+      outbound: {enabled: false}
+      inbound:
+        force_tier: quiet            # never dense-poll, even after fresh comments
+        daily_actions: {min: 0, max: 4}
+    - weeks: 2                       # weeks 3-4: one short session, 1-2 comments
+      outbound:
+        sessions_per_day: {min: 1, max: 1}
+        session_minutes:  {min: 30, max: 45}
+        daily_actions:    {min: 1, max: 2}
+        skip_day_prob:    0.40
+      inbound:
+        dense_minutes:  {min: 30, max: 45}
+        daily_actions:  {min: 0, max: 6}
+    - weeks: 2                       # weeks 5-6: two sessions, still light
+      outbound:
+        sessions_per_day: {min: 1, max: 2}
+        session_minutes:  {min: 40, max: 60}
+        daily_actions:    {min: 2, max: 4}
+        skip_day_prob:    0.25
+      inbound:
+        daily_actions:  {min: 0, max: 8}
+  # week 7+ → normal per-platform config below
+
 x:
   outbound:                          # goodwill comments on the home feed
     sessions_per_day: {min: 1, max: 2}

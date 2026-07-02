@@ -29,6 +29,13 @@ x:
   cost:
     daily_cap_usd: 2.0
     abort_on_cap: true
+  reads:
+    # Views (reads) are what X rate-limits — free accounts get ~600-1000 post
+    # views/day and every automated page load renders dozens of posts. This
+    # budgets page NAVIGATIONS (each ≈ 10-50 post views). Cadence stops firing
+    # when the budget is spent. Raise gradually as account trust recovers.
+    page_views_per_day: 60
+    rate_limit_cooldown_hours: 3   # stand down this long (jittered up to 2x) after a rate_limited event
 
 linkedin:
   live: true
@@ -43,6 +50,11 @@ linkedin:
   session:
     require_warmed_days: 30      # account must be ≥ 30d of regular human use
     headed_login_first: true     # first login must be in headed mode
+  reads:
+    # Same read-budget scheme as X (lipy page loads count here). LinkedIn's
+    # restriction scoring also weighs read volume, so keep this tight.
+    page_views_per_day: 40
+    rate_limit_cooldown_hours: 6   # LinkedIn warnings are scarier — back off longer
 
 # Outbound 5-minute hold buffer (recommended even under "fully autonomous")
 # Drafts surface in the dashboard for this long before posting; you can yank.

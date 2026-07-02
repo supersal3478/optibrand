@@ -62,6 +62,23 @@ def log_event(event: str, *, platform: str = "x", mode: str | None = None,
         print(f"[metrics] write failed: {e}", file=sys.stderr)
 
 
+def log_page_view(platform: str, n: int = 1, **fields: Any) -> None:
+    """Record `n` page navigations against the platform's daily view budget.
+    Reads (views) are what the platforms actually rate-limit, so they're
+    budgeted like writes. One event per batch; `n` carries the weight."""
+    log_event("page_view", platform=platform, n=n, **fields)
+
+
+def page_views_today(platform: str) -> int:
+    """Sum of page_view weights today for this platform."""
+    start = _start_of_local_day()
+    total = 0
+    for row in iter_events(since=start):
+        if row.get("event") == "page_view" and row.get("platform") == platform:
+            total += int(row.get("n", 1))
+    return total
+
+
 def iter_events(since: datetime | None = None) -> Iterable[dict]:
     """Yield events from the metrics JSONL, optionally filtered by ts >= since.
 

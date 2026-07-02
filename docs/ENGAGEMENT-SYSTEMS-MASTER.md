@@ -5,8 +5,23 @@ systems — the methodology, the architecture, every script and its status, what
 has been tested, and a precise build-plan for what remains. Written so a new
 engineer or AI can continue the build without re-deriving context.
 
-**Last updated:** 2026-06-22. **Branch:** `macmini-live`. **Runs on:** the Mac
+**Last updated:** 2026-07-02. **Branch:** `macmini-live`. **Runs on:** the Mac
 mini (the always-on machine); this desktop is for editing/review.
+
+> **2026-07-02 session update — READ-SIDE PROTECTION + RECOVERY RAMP (both
+> platforms).** The account got view-rate-limited on X; root cause was read
+> volume: every inbound check swept the profile + every permalink + back-nav
+> (~13 loads / 100+ post views), up to ~19×/day — far past the free-tier view
+> budget. New, applied identically to X and LinkedIn: (1) a `recovery:` ramp
+> in `cadence.yaml` (weeks 1-2 no outbound + quiet-only inbound → weeks 3-4
+> one small session → weeks 5-6 two sessions → normal; reduce-only vs
+> baseline); (2) a **page-view budget** — all navigations logged as
+> `page_view` events, capped via `caps.yaml <platform>.reads`; (3) a
+> **rate-limit circuit breaker** — scrapers detect the throttle page, log
+> `rate_limited`, cadence stands down for a jittered cooldown; (4) **cheap
+> inbound checks on X** — mentions page only (1 load), full sweep once/day;
+> (5) X windows narrowed to 09:00–22:00 (no more 3am sessions). See
+> [human-cadence.md](human-cadence.md) § Recovery ramp.
 
 > **▶ Setting this up on a NEW laptop / handing to a new agent?** Start with
 > [NEW-MACHINE-RUNBOOK.md](NEW-MACHINE-RUNBOOK.md) — the step-by-step *executable*

@@ -293,6 +293,8 @@ def _save_seen(seen: dict) -> None:
 
 def fetch_feed(limit: int) -> dict:
     """Run `lipy feed` and return {ok, posts:[{urn, url, author, text}]}."""
+    # One home-feed load per call; counts against linkedin.reads budget.
+    _metrics.log_page_view("linkedin", via="lipy_feed")
     try:
         p = subprocess.run([str(LIPY_BIN), "feed", "--limit", str(limit)],
                            capture_output=True, text=True, timeout=240)

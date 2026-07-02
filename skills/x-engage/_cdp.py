@@ -12,14 +12,33 @@ from __future__ import annotations
 
 import asyncio
 import json
+import sys
 import urllib.request
 from contextlib import asynccontextmanager
+from pathlib import Path
 from typing import Any
 
 import websockets
 
 DEFAULT_CDP_PORT = 9222
 DEFAULT_TAB_URL_SUBSTRING = "x.com"
+
+# Page views are budgeted like writes (caps.yaml x.reads) — every navigation
+# through this session counts. Soft dependency: if _metrics isn't importable
+# (odd sys.path), navigation still works, just uncounted.
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent / "scripts"))
+try:
+    import _metrics as _pv_metrics
+except Exception:  # pragma: no cover
+    _pv_metrics = None
+
+
+def _count_page_view() -> None:
+    if _pv_metrics is not None:
+        try:
+            _pv_metrics.log_page_view("x", via="cdp")
+        except Exception:
+            pass
 
 
 def find_tab(cdp_port: int = DEFAULT_CDP_PORT,
@@ -56,6 +75,7 @@ class CDPSession:
 
     async def navigate(self, url: str, settle_seconds: float = 5.0) -> None:
         await self.call("Page.navigate", {"url": url})
+        _count_page_view()
         await asyncio.sleep(settle_seconds)
 
     async def eval_js(self, expression: str, await_promise: bool = True,

@@ -54,6 +54,40 @@ inbound-every-10m / commenter-every-15m crons. Re-run `autonomy-mode.sh` to pick
 up the change. (`engage-commenter` is no longer auto-scheduled; it can be folded
 into the cadence later.)
 
+## Recovery ramp (added 2026-07-02)
+
+After a rate-limit / restriction event, don't switch back on at full volume —
+X scores that as a bot resuming. The `recovery:` block in `config/cadence.yaml`
+phases activity back in, **identically for X and LinkedIn** (one engine, one
+config):
+
+| Stage | Weeks | Outbound | Inbound |
+|---|---|---|---|
+| 1 | 1–2 | **disabled** | quiet glances only (forced), ≤4 replies/day |
+| 2 | 3–4 | 1 session, 30–45 min, 1–2 comments, 40% skip-days | dense relaxed to 30–45 min, ≤6/day |
+| 3 | 5–6 | up to 2 sessions, 2–4 comments, 25% skip-days | ≤8/day |
+| — | 7+ | normal platform config | normal decay |
+
+Set `recovery.start_date` to the day you re-enable; delete it (or
+`enabled: false`) to turn the ramp off. Stage values can only **reduce**
+activity relative to a platform's baseline (volume ranges min'd, wait
+intervals max'd, skip-day prob max'd), so LinkedIn's lighter defaults are
+never raised by a stage.
+
+Three read-side guards run underneath, because **views are what platforms
+rate-limit**:
+
+- **View budget** — every page navigation is logged (`page_view` events);
+  `caps.yaml <platform>.reads.page_views_per_day` stops all cadence firing
+  when spent (X: 60, LinkedIn: 40).
+- **Rate-limit circuit breaker** — the X scrapers detect the "rate limit"
+  error page and log `rate_limited`; the cadence then stands down for a
+  jittered `rate_limit_cooldown_hours`–2× (X: 3h, LinkedIn: 6h) instead of
+  refreshing into the limit.
+- **Cheap inbound checks (X)** — most checks hit only `/notifications/mentions`
+  (1 page load); the expensive full profile sweep (profile + every permalink +
+  back-nav ≈ 10–15 loads) runs once per day.
+
 ## Defaults (recommended starting point)
 
 - **X outbound:** 1–2 sessions/day, 25–60 min each, 3–8 comments/day, 5–15 min
